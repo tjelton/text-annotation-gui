@@ -1,0 +1,25 @@
+# Annotation configuration for student feedback classification
+#
+# Format:
+#   Label:  <name>  <key>  <colour>
+#
+# <name>   : the classification label (appears in .annotations files as "label:<name>")
+# <key>    : single keyboard character to apply this label (must not be [ ] u)
+# <colour> : colour name or hex (#RRGGBB)
+#
+# Supported colour names:
+#   red, blue, green, yellow, magenta, purple, cyan, orange, pink, brown,
+#   white, black, lime, indigo, teal, coral, navy
+#
+# Press the key while text is selected to apply/toggle the label.
+# Press 'u' to remove all labels from the current selection.
+# Press ']' for next file, '[' for previous file.
+# Ctrl+S to save, Ctrl+Z to undo, Ctrl+Q to quit.
+
+Label:  F-UP    f   #e74c3c
+Label:  F-BK    b   #3498db
+Label:  F-FD    d   #9b59b6
+Label:  SELF    s   #e67e22
+Label:  TASK    t   #f1c40f
+Label:  PROC    p   #1abc9c
+Label:  SREG    r   #2ecc71
