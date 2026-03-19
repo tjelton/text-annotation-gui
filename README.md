@@ -59,19 +59,19 @@ This opens the annotation window. Select text, press a label key, and your annot
 ## The Interface
 
 ```
-┌──────────────────────────────────────────────────────────────────┐
+┌─────────────────────────────────────────────────────────────────────────┐
 │  [◀ Previous]   annotator — 01.txt   (1 / 50)   [Save] [Help] [Next ▶]  │
-├──────────────────────────────────────────────────────────────────┤
-│                                                                   │
-│  Marie Curie was born in Warsaw in 1867 and later               │
-│  moved to Paris, where she conducted research at                 │
-│  the University of Paris.                                        │
-│                                            ↑ scrollable          │
-├──────────────────────────────────────────────────────────────────┤
-│  Labels:  [p] PER ████  [o] ORG ████  [l] LOC ████  …           │
-├──────────────────────────────────────────────────────────────────┤
-│  Status: Ready                                                    │
-└──────────────────────────────────────────────────────────────────┘
+├─────────────────────────────────────────────────────────────────────────┤
+│                                                                         │
+│  Marie Curie was born in Warsaw in 1867 and later                       │
+│  moved to Paris, where she conducted research at                        │
+│  the University of Paris.                                               │
+│                                                           ↑ scrollable  │
+├─────────────────────────────────────────────────────────────────────────┤
+│  Labels:  [p] PER ████  [o] ORG ████  [l] LOC ████  …                  │
+├─────────────────────────────────────────────────────────────────────────┤
+│  Status: Ready                                                          │
+└─────────────────────────────────────────────────────────────────────────┘
 ```
 
 | Area | Purpose |

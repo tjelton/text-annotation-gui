@@ -1,4 +1,4 @@
-# Annotation configuration for student feedback classification
+# Annotation configuration — Named Entity Recognition (NER) example
 #
 # Format:
 #   Label:  <name>  <key>  <colour>
@@ -16,10 +16,8 @@
 # Press ']' for next file, '[' for previous file.
 # Ctrl+S to save, Ctrl+Z to undo, Ctrl+Q to quit.
 
-Label:  F-UP    f   #e74c3c
-Label:  F-BK    b   #3498db
-Label:  F-FD    d   #9b59b6
-Label:  SELF    s   #e67e22
-Label:  TASK    t   #f1c40f
-Label:  PROC    p   #1abc9c
-Label:  SREG    r   #2ecc71
+Label:  PER     p   #e74c3c
+Label:  ORG     o   #3498db
+Label:  LOC     l   #2ecc71
+Label:  DATE    d   #e67e22
+Label:  MISC    m   #9b59b6
