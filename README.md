@@ -68,7 +68,7 @@ This opens the annotation window. Select text, press a label key, and your annot
 │  the University of Paris.                                               │
 │                                                           ↑ scrollable  │
 ├─────────────────────────────────────────────────────────────────────────┤
-│  Labels:  [p] PER ████  [o] ORG ████  [l] LOC ████  …                  │
+│  Labels:  [p] PER ████  [o] ORG ████  [l] LOC ████  …                   │
 ├─────────────────────────────────────────────────────────────────────────┤
 │  Status: Ready                                                          │
 └─────────────────────────────────────────────────────────────────────────┘
