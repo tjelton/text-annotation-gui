@@ -2,16 +2,22 @@
 config.py — Parse the label configuration file.
 
 Config file format (lines starting with # are comments):
-    Label:  <name>  <key>  <colour>
+    Label:  <name>  <key>  <colour_or_style>
+
+The fourth field can be:
+  - A colour: named (e.g. red, blue) or hex (#RRGGBB / #RGB)
+  - A text style: bold, italic, or underline
 
 Example:
     Label:  F-UP    f   red
     Label:  F-BK    b   #3498db
+    Label:  PER     p   italic
+    Label:  DATE    d   bold
 """
 
 import re
 from dataclasses import dataclass
-from typing import Dict
+from typing import Dict, Optional
 
 
 # Keys reserved for navigation / built-in commands
@@ -38,14 +44,18 @@ COLOUR_MAP: Dict[str, str] = {
     'navy':    '#1a237e',
 }
 
+# Text-style keywords (used instead of colour)
+STYLE_SET = {'bold', 'italic', 'underline'}
+
 
 @dataclass
 class LabelConfig:
-    name: str      # Display name, e.g. "F-UP"
-    internal: str  # Slate-compatible name with prefix, e.g. "label:F-UP"
-    key: str       # Single keyboard character, e.g. "f"
-    colour: str    # Hex colour string, e.g. "#e74c3c"
-    tag: str       # tkinter tag name (safe for use as tag identifier)
+    name: str                # Display name, e.g. "F-UP"
+    internal: str            # Slate-compatible name with prefix, e.g. "label:F-UP"
+    key: str                 # Single keyboard character, e.g. "f"
+    colour: Optional[str]    # Hex colour string, e.g. "#e74c3c" (None for style-based)
+    style: Optional[str]     # "bold", "italic", or "underline" (None for colour-based)
+    tag: str                 # tkinter tag name (safe for use as tag identifier)
 
 
 class Config:
@@ -90,8 +100,13 @@ class Config:
                         f"label '{config.labels[key].name}'"
                     )
 
-                # Resolve colour to hex
-                hex_colour = _resolve_colour(colour, lineno)
+                # Resolve appearance: text style or colour
+                if colour.lower() in STYLE_SET:
+                    hex_colour = None
+                    style = colour.lower()
+                else:
+                    hex_colour = _resolve_colour(colour, lineno)
+                    style = None
 
                 internal = f"label:{name}"
                 # Tag name must be safe for tkinter (no : - special chars)
@@ -99,7 +114,7 @@ class Config:
 
                 lc = LabelConfig(
                     name=name, internal=internal,
-                    key=key, colour=hex_colour, tag=tag,
+                    key=key, colour=hex_colour, style=style, tag=tag,
                 )
                 config.labels[key] = lc
                 config.internal_to_config[internal] = lc

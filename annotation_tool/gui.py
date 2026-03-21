@@ -18,6 +18,7 @@ Layout (top to bottom):
 import os
 import tkinter as tk
 from tkinter import messagebox
+import tkinter.font as tkfont
 from typing import List, Optional, Tuple
 
 from .config import Config, LabelConfig
@@ -73,6 +74,9 @@ class AnnotationApp:
 
         # The snapped selection: (start_line, start_tok, end_line, end_tok) — all 0-indexed
         self.current_span: Optional[Tuple[int, int, int, int]] = None
+
+        # Cache for composite style tags (used when multiple style labels overlap)
+        self._combo_tags: dict = {}
 
         self._build_ui()
         self._configure_tags()
@@ -151,7 +155,7 @@ class AnnotationApp:
         legend_frame.pack(fill='x', side='bottom', padx=0, pady=0)
 
         tk.Label(
-            legend_frame, text='Labels:', bg='#ecf0f1',
+            legend_frame, text='Labels:', bg='#ecf0f1', fg='black',
             font=('Helvetica', 10, 'bold'), padx=8, pady=5,
         ).pack(side='left')
 
@@ -162,14 +166,30 @@ class AnnotationApp:
                 cell, text=f'[{lc.key}]', bg='#ecf0f1',
                 font=('Courier', 10, 'bold'), fg='#2c3e50',
             ).pack(side='left')
-            tk.Label(
-                cell,
-                text=f' {lc.name} ',
-                bg=lc.colour,
-                fg=_contrast(lc.colour),
-                font=('Helvetica', 10, 'bold'),
-                relief='flat', padx=4, pady=2,
-            ).pack(side='left', padx=(2, 4))
+            if lc.style:
+                swatch_font = tkfont.Font(
+                    family='Helvetica', size=10,
+                    weight='bold' if lc.style == 'bold' else 'normal',
+                    slant='italic' if lc.style == 'italic' else 'roman',
+                    underline=lc.style == 'underline',
+                )
+                tk.Label(
+                    cell,
+                    text=f' {lc.name} ',
+                    bg='#ecf0f1',
+                    fg='#2c3e50',
+                    font=swatch_font,
+                    relief='groove', padx=4, pady=2,
+                ).pack(side='left', padx=(2, 4))
+            else:
+                tk.Label(
+                    cell,
+                    text=f' {lc.name} ',
+                    bg=lc.colour,
+                    fg='black',
+                    font=('Helvetica', 10, 'bold'),
+                    relief='flat', padx=4, pady=2,
+                ).pack(side='left', padx=(2, 4))
 
         # Multi-label indicator in legend
         cell = tk.Frame(legend_frame, bg='#ecf0f1', padx=4, pady=4)
@@ -180,7 +200,7 @@ class AnnotationApp:
         ).pack(side='left')
         tk.Label(
             cell,
-            text=' multi ',
+            text=' multi-coloured ',
             bg=self.MULTI_LABEL_COLOUR,
             fg='white',
             font=('Helvetica', 10),
@@ -220,11 +240,21 @@ class AnnotationApp:
     def _configure_tags(self) -> None:
         """Register tkinter Text tags for each label and for multi-label spans."""
         for lc in self.config.labels.values():
-            self.text_widget.tag_configure(
-                lc.tag,
-                background=lc.colour,
-                foreground=_contrast(lc.colour),
-            )
+            if lc.style:
+                opts: dict = {}
+                if lc.style == 'bold':
+                    opts['font'] = ('Helvetica', 13, 'bold')
+                elif lc.style == 'italic':
+                    opts['font'] = ('Helvetica', 13, 'italic')
+                elif lc.style == 'underline':
+                    opts['underline'] = True
+                self.text_widget.tag_configure(lc.tag, **opts)
+            else:
+                self.text_widget.tag_configure(
+                    lc.tag,
+                    background=lc.colour,
+                    foreground=_contrast(lc.colour),
+                )
         self.text_widget.tag_configure(
             self.MULTI_LABEL_TAG,
             background=self.MULTI_LABEL_COLOUR,
@@ -404,6 +434,8 @@ class AnnotationApp:
         for lc in self.config.labels.values():
             self.text_widget.tag_remove(lc.tag, '1.0', 'end')
         self.text_widget.tag_remove(self.MULTI_LABEL_TAG, '1.0', 'end')
+        for combo_tag in self._combo_tags.values():
+            self.text_widget.tag_remove(combo_tag, '1.0', 'end')
 
         # Build per-token label sets: (slate_line, token) → set of internal label names
         pos_labels: dict = {}
@@ -421,13 +453,9 @@ class AnnotationApp:
         for (sl, tok), labels in pos_labels.items():
             if sl not in line_tok_tags:
                 line_tok_tags[sl] = {}
-            if len(labels) == 1:
-                internal = next(iter(labels))
-                lc = self.config.internal_to_config.get(internal)
-                if lc:
-                    line_tok_tags[sl][tok] = lc.tag
-            else:
-                line_tok_tags[sl][tok] = self.MULTI_LABEL_TAG
+            tag = self._resolve_tag(labels)
+            if tag:
+                line_tok_tags[sl][tok] = tag
 
         # Apply tags, merging contiguous runs of the same tag to fill gaps
         for sl, tok_tags in line_tok_tags.items():
@@ -460,6 +488,67 @@ class AnnotationApp:
                 f"{tk_line}.{start_cr[0]}",
                 f"{tk_line}.{end_cr[1] + 1}",
             )
+
+    def _resolve_tag(self, labels: set) -> str:
+        """Resolve a set of label internals to a single tkinter tag name.
+
+        For a single label, returns its pre-configured tag.  For multiple
+        labels, creates (and caches) a composite tag that combines all
+        visual properties — overlapping text styles merge naturally while
+        overlapping colours fall back to the multi-label grey.
+        """
+        if len(labels) == 1:
+            internal = next(iter(labels))
+            lc = self.config.internal_to_config.get(internal)
+            return lc.tag if lc else self.MULTI_LABEL_TAG
+
+        key = frozenset(labels)
+        if key in self._combo_tags:
+            return self._combo_tags[key]
+
+        # Separate style-based and colour-based labels
+        styles: set = set()
+        colour_lcs: list = []
+        for internal in labels:
+            lc = self.config.internal_to_config.get(internal)
+            if not lc:
+                continue
+            if lc.style:
+                styles.add(lc.style)
+            elif lc.colour:
+                colour_lcs.append(lc)
+
+        opts: dict = {}
+
+        # Background colour
+        if len(colour_lcs) == 1:
+            opts['background'] = colour_lcs[0].colour
+            opts['foreground'] = _contrast(colour_lcs[0].colour)
+        elif len(colour_lcs) > 1:
+            opts['background'] = self.MULTI_LABEL_COLOUR
+            opts['foreground'] = 'white'
+
+        # Font styles
+        font_parts = []
+        if 'bold' in styles:
+            font_parts.append('bold')
+        if 'italic' in styles:
+            font_parts.append('italic')
+        if font_parts:
+            opts['font'] = ('Helvetica', 13, ' '.join(font_parts))
+        if 'underline' in styles:
+            opts['underline'] = True
+
+        if not opts:
+            return self.MULTI_LABEL_TAG
+
+        # Build a deterministic tag name
+        tag_name = 'combo_' + '_'.join(
+            s.replace(':', '_').replace('-', '_') for s in sorted(labels)
+        )
+        self.text_widget.tag_configure(tag_name, **opts)
+        self._combo_tags[key] = tag_name
+        return tag_name
 
     # ------------------------------------------------------------------
     # Mouse selection → token-snapping
