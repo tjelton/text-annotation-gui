@@ -702,7 +702,7 @@ class AnnotationApp:
 
         self._redraw_annotations()
         self.has_unsaved = True
-        self._clear_selection()
+        self._restore_selection()
         self.status_var.set(f"{action} label '{lc.name}' [{lc.key}]")
 
     def _multiline_all_have(
@@ -779,6 +779,20 @@ class AnnotationApp:
     def _clear_selection(self) -> None:
         self.text_widget.tag_remove('sel', '1.0', 'end')
         self.current_span = None
+
+    def _restore_selection(self) -> None:
+        """Re-apply the visual 'sel' highlight from current_span after a redraw."""
+        if self.current_span is None:
+            return
+        start_sl, start_tok, end_sl, end_tok = self.current_span
+        start_cr = self.token_map.token_char_range(start_sl, start_tok)
+        end_cr   = self.token_map.token_char_range(end_sl,   end_tok)
+        if start_cr and end_cr:
+            tk_sel_start = f"{start_sl + 1}.{start_cr[0]}"
+            tk_sel_end   = f"{end_sl   + 1}.{end_cr[1] + 1}"
+            self.text_widget.tag_remove('sel', '1.0', 'end')
+            self.text_widget.tag_add('sel', tk_sel_start, tk_sel_end)
+            self.text_widget.tag_raise('sel')
 
     # ------------------------------------------------------------------
     # Save / navigate
