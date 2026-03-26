@@ -149,7 +149,7 @@ The configuration file tells the tool what labels to use, which key activates ea
 ```
 # Lines starting with # are comments and are ignored
 # Blank lines are also ignored
-# Format: Label:  <name>  <key>  <colour>
+# Format: Label:  <name>  <key>  <colour_or_style>
 
 Label:  PER     p   #e74c3c
 Label:  ORG     o   #3498db
@@ -164,13 +164,36 @@ Each `Label:` line has three fields (whitespace-separated):
 |---|---|---|
 | `name` | The label identifier. Appears in annotation files as `label:<name>`. | `PER` |
 | `key` | A **single character** key the annotator presses to apply the label. | `p` |
-| `colour` | A colour name or hex code for the highlight colour. | `red` or `#e74c3c` |
+| `colour_or_style` | A colour name, hex code, or text style for how the label is displayed. | `red`, `#e74c3c`, or `bold` |
 
 ### Supported colour names
 
 `red`, `blue`, `green`, `yellow`, `magenta`, `purple`, `cyan`, `orange`, `pink`, `brown`, `white`, `black`, `lime`, `indigo`, `teal`, `coral`, `navy`
 
 Any standard hex colour (`#RRGGBB` or `#RGB`) is also accepted.
+
+### Text styles
+
+Instead of a highlight colour, a label can be displayed using a **text style**:
+
+| Style | Effect |
+|---|---|
+| `bold` | Text is rendered in bold |
+| `italic` | Text is rendered in italic |
+| `underline` | Text is underlined |
+
+Text styles are useful when you want to distinguish labels without adding background colour — for example, to keep the text visually clean or to avoid obscuring colour-coded overlaps.
+
+```
+# Mix of colours and text styles
+Label:  PER     p   italic
+Label:  ORG     o   underline
+Label:  LOC     l   #2ecc71
+Label:  DATE    d   bold
+Label:  MISC    m   #9b59b6
+```
+
+> **Note:** When a span carries multiple labels, one of which uses a text style, the style is applied alongside the grey multi-label highlight.
 
 ### Rules
 
