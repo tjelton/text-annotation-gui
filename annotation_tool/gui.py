@@ -75,6 +75,9 @@ class AnnotationApp:
         # The snapped selection: (start_line, start_tok, end_line, end_tok) — all 0-indexed
         self.current_span: Optional[Tuple[int, int, int, int]] = None
 
+        # Font size for the text area (adjustable at runtime)
+        self.font_size: int = 13
+
         # Cache for composite style tags (used when multiple style labels overlap)
         self._combo_tags: dict = {}
 
@@ -116,6 +119,20 @@ class AnnotationApp:
             font=('Helvetica', 11),
         )
         self.lbl_progress.pack(side='left', padx=10)
+
+        tk.Button(
+            hdr, text='－', command=lambda: self._change_font_size(-1),
+            bg='#34495e', fg='black', activebackground='#4a6278',
+            activeforeground='black', relief='flat', padx=8, pady=5,
+            font=('Helvetica', 11),
+        ).pack(side='left', padx=(0, 2))
+
+        tk.Button(
+            hdr, text='＋', command=lambda: self._change_font_size(1),
+            bg='#34495e', fg='black', activebackground='#4a6278',
+            activeforeground='black', relief='flat', padx=8, pady=5,
+            font=('Helvetica', 11),
+        ).pack(side='left', padx=(0, 6))
 
         btn_save = tk.Button(
             hdr, text='Save', command=self._save_current,
@@ -228,7 +245,7 @@ class AnnotationApp:
         self.text_widget = tk.Text(
             text_outer,
             wrap='word',
-            font=('Helvetica', 13),
+            font=('Helvetica', self.font_size),
             yscrollcommand=scrollbar.set,
             # Keep 'normal' so we can intercept key events reliably;
             # all text-modification keys are blocked in _on_key_press.
@@ -254,9 +271,9 @@ class AnnotationApp:
             if lc.style:
                 opts: dict = {}
                 if lc.style == 'bold':
-                    opts['font'] = ('Helvetica', 13, 'bold')
+                    opts['font'] = ('Helvetica', self.font_size, 'bold')
                 elif lc.style == 'italic':
-                    opts['font'] = ('Helvetica', 13, 'italic')
+                    opts['font'] = ('Helvetica', self.font_size, 'italic')
                 elif lc.style == 'underline':
                     opts['underline'] = True
                 self.text_widget.tag_configure(lc.tag, **opts)
@@ -314,6 +331,10 @@ class AnnotationApp:
                 self._undo()
             elif k == 'q':
                 self._quit()
+            elif k in ('equal', 'plus'):
+                self._change_font_size(1)
+            elif k == 'minus':
+                self._change_font_size(-1)
             elif k in ('c', 'a'):
                 return  # Allow copy and select-all
             return 'break'
@@ -549,7 +570,7 @@ class AnnotationApp:
         if 'italic' in styles:
             font_parts.append('italic')
         if font_parts:
-            opts['font'] = ('Helvetica', 13, ' '.join(font_parts))
+            opts['font'] = ('Helvetica', self.font_size, ' '.join(font_parts))
         if 'underline' in styles:
             opts['underline'] = True
 
@@ -946,6 +967,20 @@ class AnnotationApp:
         ).pack(pady=10)
 
         win.protocol('WM_DELETE_WINDOW', _close_help)
+
+    def _change_font_size(self, delta: int) -> None:
+        """Increase or decrease the text area font size by *delta* points."""
+        new_size = max(6, min(40, self.font_size + delta))
+        if new_size == self.font_size:
+            return
+        self.font_size = new_size
+        self.text_widget.config(font=('Helvetica', self.font_size))
+        # Reconfigure style-based tags with the new size
+        self._configure_tags()
+        # Invalidate combo-tag cache so they are rebuilt at the new size
+        self._combo_tags.clear()
+        if self.token_map is not None:
+            self._redraw_annotations()
 
     def _quit(self) -> None:
         if self.has_unsaved:
