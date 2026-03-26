@@ -142,13 +142,24 @@ class AnnotationApp:
         self.btn_next.pack(side='left')
 
         # ── Status bar ────────────────────────────────────────────────
+        status_frame = tk.Frame(self.root, bg='#bdc3c7')
+        status_frame.pack(fill='x', side='bottom')
+
         self.status_var = tk.StringVar(value='Ready')
-        status_bar = tk.Label(
-            self.root, textvariable=self.status_var,
+        tk.Label(
+            status_frame, textvariable=self.status_var,
             anchor='w', bg='#bdc3c7', fg='#2c3e50',
             font=('Helvetica', 10), padx=10, pady=3,
+        ).pack(side='left', fill='x', expand=True)
+
+        self.cursor_tags_var = tk.StringVar(value='')
+        self.cursor_tags_label = tk.Label(
+            status_frame, textvariable=self.cursor_tags_var,
+            anchor='e', bg='#bdc3c7', fg='#2c3e50',
+            font=('Helvetica', 10, 'bold'), padx=10, pady=3,
+            relief='flat',
         )
-        status_bar.pack(fill='x', side='bottom')
+        self.cursor_tags_label.pack(side='right')
 
         # ── Legend panel ──────────────────────────────────────────────
         legend_frame = tk.Frame(self.root, bg='#ecf0f1', relief='groove', bd=1)
@@ -277,6 +288,8 @@ class AnnotationApp:
         # Mouse bindings
         self.text_widget.bind('<ButtonRelease-1>', self._on_mouse_release)
         self.text_widget.bind('<Button-1>', self._on_mouse_click)
+        self.text_widget.bind('<Motion>', self._on_mouse_motion)
+        self.text_widget.bind('<Leave>', lambda e: self._update_cursor_tags([]))
 
         # Window close
         self.root.protocol('WM_DELETE_WINDOW', self._quit)
@@ -383,6 +396,7 @@ class AnnotationApp:
         self.undo_stack.clear()
         self.has_unsaved = False
         self.current_span = None
+        self._update_cursor_tags([])
 
         # Populate text widget
         self.text_widget.config(state='normal')
@@ -562,6 +576,34 @@ class AnnotationApp:
         """Schedule snap after the Text widget finishes updating the selection."""
         self.root.after(15, self._snap_selection)
 
+    def _on_mouse_motion(self, event: tk.Event) -> None:
+        """Update the cursor-position tag box as the mouse moves over the text."""
+        if self.token_map is None:
+            return
+        if self.current_span is not None:
+            return  # Selection is active; box is managed by _restore_selection
+        tk_index = self.text_widget.index(f"@{event.x},{event.y}")
+        slate_line, token = self.token_map.tk_to_slate(tk_index)
+        if token is None:
+            self._update_cursor_tags([])
+            return
+        names = []
+        for ann in self.annotation_set.annotations:
+            if ann.overlaps_span(slate_line, token, token):
+                for internal in sorted(ann.labels):
+                    lc = self.config.internal_to_config.get(internal)
+                    names.append(lc.name if lc else internal.removeprefix('label:'))
+        self._update_cursor_tags(names)
+
+    def _update_cursor_tags(self, names: list) -> None:
+        """Update the cursor-position tag box without resizing the status bar."""
+        if names:
+            self.cursor_tags_var.set('  '.join(names))
+            self.cursor_tags_label.config(relief='groove')
+        else:
+            self.cursor_tags_var.set('')
+            self.cursor_tags_label.config(relief='flat')
+
     def _snap_selection(self) -> None:
         """
         Read the current tkinter selection, snap to token boundaries, and
@@ -642,6 +684,7 @@ class AnnotationApp:
                 f"line {end_sl} tok {end_tok}"
             )
         self.status_var.set(f"Selected: {span_desc}   (press a label key to annotate)")
+        self._update_cursor_tags(self._labels_in_selection())
 
     # ------------------------------------------------------------------
     # Label application
@@ -779,6 +822,7 @@ class AnnotationApp:
     def _clear_selection(self) -> None:
         self.text_widget.tag_remove('sel', '1.0', 'end')
         self.current_span = None
+        self._update_cursor_tags([])
 
     def _restore_selection(self) -> None:
         """Re-apply the visual 'sel' highlight from current_span after a redraw."""
@@ -793,6 +837,26 @@ class AnnotationApp:
             self.text_widget.tag_remove('sel', '1.0', 'end')
             self.text_widget.tag_add('sel', tk_sel_start, tk_sel_end)
             self.text_widget.tag_raise('sel')
+        self._update_cursor_tags(self._labels_in_selection())
+
+    def _labels_in_selection(self) -> list:
+        """Return sorted display names of all labels covering the current span."""
+        if self.current_span is None:
+            return []
+        start_sl, start_tok, end_sl, end_tok = self.current_span
+        seen = set()
+        names = []
+        for ann in self.annotation_set.annotations:
+            for line in range(start_sl, end_sl + 1):
+                s = start_tok if line == start_sl else 0
+                e = end_tok   if line == end_sl   else self.token_map.num_tokens(line) - 1
+                if ann.overlaps_span(line, s, e):
+                    for internal in sorted(ann.labels):
+                        if internal not in seen:
+                            seen.add(internal)
+                            lc = self.config.internal_to_config.get(internal)
+                            names.append(lc.name if lc else internal.removeprefix('label:'))
+        return names
 
     # ------------------------------------------------------------------
     # Save / navigate
