@@ -1,26 +1,28 @@
-# Annotation configuration — Named Entity Recognition (NER) example
+# Annotation configuration — Feedback example
 #
 # Format:
-#   Label:  <name>  <key>  <colour>
+#   Label:  <name>  <key>  <colour_or_style>
 #
 # <name>   : the classification label (appears in .annotations files as "label:<name>")
 # <key>    : single keyboard character to apply this label (must not be [ ] u)
-# <colour> : colour name, hex (#RRGGBB), or text style (bold, italic, underline)
+# <colour_or_style> : colour name, hex (#RRGGBB), or text style (bold, italic, underline)
 #
 # Supported colour names:
 #   red, blue, green, yellow, magenta, purple, cyan, orange, pink, brown,
 #   white, black, lime, indigo, teal, coral, navy
+#
+# Supported text styles (useful for overlapping labels):
+#   bold, italic, underline
 #
 # Press the key while text is selected to apply/toggle the label.
 # Press 'u' to remove all labels from the current selection.
 # Press ']' for next file, '[' for previous file.
 # Ctrl+S to save, Ctrl+Z to undo, Ctrl+Q to quit.
 
-Label:  F-UP     1   #e74c3c
-Label:  F-BA     2   #3498db
-Label:  F-FF     3   #2ecc71
+Label:  F-UP     1   italic
+Label:  F-BA     2   bold
+Label:  F-FF     3   underline
 Label:  SELF    q   #e67e22
 Label:  TASK    w   #9b59b6
 Label:  PROC    e   #00ff04
 Label:  SREG    r   #00f7ff
-
