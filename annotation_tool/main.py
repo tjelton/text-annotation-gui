@@ -4,7 +4,7 @@ main.py — Command-line entry point for the annotation tool.
 Usage:
     python -m annotation_tool -f <folder> -c <config>
     python -m annotation_tool -f <folder> -c <config> -o <output_dir> -a <name>
-    python -m annotation_tool -f <folder> -c <config> --resume
+    python -m annotation_tool -f <folder> -c <config> -o <output_dir> -a <name>
 """
 
 import argparse
@@ -25,7 +25,7 @@ def main() -> None:
 Examples:
   python -m annotation_tool -f ./HT_Feedback_Examples -c config.txt
   python -m annotation_tool -f ./data -c config.txt -o ./output -a alice
-  python -m annotation_tool -f ./data -c config.txt --resume
+  python -m annotation_tool -f ./data -c config.txt -o ./output -a alice
 
 Keyboard shortcuts (in the tool):
   <label key>   Apply / toggle the label on the current selection
@@ -63,11 +63,6 @@ Keyboard shortcuts (in the tool):
             'annotators can work on the same files independently.'
         ),
     )
-    parser.add_argument(
-        '--resume', action='store_true',
-        help='Load and continue editing existing annotation files.',
-    )
-
     args = parser.parse_args()
 
     # --- Validate inputs ---------------------------------------------------
@@ -109,4 +104,4 @@ Keyboard shortcuts (in the tool):
 
     # --- Launch GUI --------------------------------------------------------
 
-    run_app(config, files, output_dir, args.annotator, args.resume)
+    run_app(config, files, output_dir, args.annotator)

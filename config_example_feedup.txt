@@ -1,11 +1,12 @@
 # Annotation configuration — Feedback example
 #
 # Format:
-#   Label:  <name>  <key>  <colour_or_style>
+#   Label:  <name>  <key>  <colour_or_style>  [group="<group>"]
 #
 # <name>   : the classification label (appears in .annotations files as "label:<name>")
 # <key>    : single keyboard character to apply this label (must not be [ ] u)
 # <colour_or_style> : colour name, hex (#RRGGBB), or text style (bold, italic, underline)
+# group="<group>" : (optional) labels in the same group are mutually exclusive
 #
 # Supported colour names:
 #   red, blue, green, yellow, magenta, purple, cyan, orange, pink, brown,
@@ -19,10 +20,10 @@
 # Press ']' for next file, '[' for previous file.
 # Ctrl+S to save, Ctrl+Z to undo, Ctrl+Q to quit.
 
-Label:  F-UP     1   italic
-Label:  F-BA     2   bold
-Label:  F-FF     3   underline
-Label:  SELF    q   #e67e22
-Label:  TASK    w   #9b59b6
-Label:  PROC    e   #00ff04
-Label:  SREG    r   #00f7ff
+Label:  F-UP     1   italic group="level"
+Label:  F-BA     2   bold group="level"
+Label:  F-FF     3   underline group="level"
+Label:  SELF    q   #e67e22  group="dimension"
+Label:  TASK    w   #9b59b6  group="dimension"
+Label:  PROC    e   #00ff04  group="dimension"
+Label:  SREG    r   #00f7ff  group="dimension"

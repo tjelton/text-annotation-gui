@@ -49,6 +49,9 @@ class AnnotationApp:
     # Multi-label overlap colour (used when several labels share a token)
     MULTI_LABEL_COLOUR = '#7f8c8d'
     MULTI_LABEL_TAG    = 'multi_lbl'
+    PIPE_TAG           = '_pipe_delim'
+    SELECT_DEFAULT_BG  = '#aed6f1'
+    SELECT_LABELLED_BG = '#a8e6cf'
 
     def __init__(
         self,
@@ -57,14 +60,12 @@ class AnnotationApp:
         files: List[str],
         output_dir: Optional[str],
         annotator: str,
-        resume: bool,
     ) -> None:
         self.root = root
         self.config = config
         self.files = files
         self.output_dir = output_dir
         self.annotator = annotator
-        self.resume = resume
 
         self.current_idx: int = 0
         self.token_map: Optional[TokenMap] = None
@@ -74,6 +75,7 @@ class AnnotationApp:
 
         # The snapped selection: (start_line, start_tok, end_line, end_tok) — all 0-indexed
         self.current_span: Optional[Tuple[int, int, int, int]] = None
+        self._drag_anchor: Optional[str] = None
 
         # Font size for the text area (adjustable at runtime)
         self.font_size: int = 13
@@ -253,7 +255,7 @@ class AnnotationApp:
             cursor='xterm',
             padx=16, pady=12,
             spacing1=4, spacing2=2, spacing3=4,
-            selectbackground='#aed6f1',
+            selectbackground=self.SELECT_DEFAULT_BG,
             selectforeground='black',
             bg='#fdfefe',
             fg='#2c3e50',
@@ -288,6 +290,11 @@ class AnnotationApp:
             background=self.MULTI_LABEL_COLOUR,
             foreground='white',
             underline=True,
+        )
+        self.text_widget.tag_configure(
+            self.PIPE_TAG,
+            font=('Helvetica', self.font_size),
+            foreground='#888888',
         )
         # Ensure the selection highlight (sel) always appears on top
         self.text_widget.tag_raise('sel')
@@ -465,6 +472,11 @@ class AnnotationApp:
         if self.token_map is None:
             return
 
+        # Remove previously inserted pipe delimiters (reverse order to preserve positions)
+        pipe_ranges = self.text_widget.tag_ranges(self.PIPE_TAG)
+        for i in range(len(pipe_ranges) - 2, -1, -2):
+            self.text_widget.delete(pipe_ranges[i], pipe_ranges[i + 1])
+
         # Remove existing annotation tags
         for lc in self.config.labels.values():
             self.text_widget.tag_remove(lc.tag, '1.0', 'end')
@@ -508,6 +520,10 @@ class AnnotationApp:
                     self._apply_tag_run(sl, run_start, prev, run_tag)
                     run_start, run_tag, prev = tok, cur_tag, tok
             self._apply_tag_run(sl, run_start, prev, run_tag)
+
+        # Insert pipe delimiters at boundaries of styled (bold/italic/underline) spans
+        self._insert_style_pipes()
+        self._propagate_tags_to_pipes()
 
         # Keep selection on top
         self.text_widget.tag_raise('sel')
@@ -586,12 +602,155 @@ class AnnotationApp:
         return tag_name
 
     # ------------------------------------------------------------------
+    # Pipe-delimiter offset correction
+    # ------------------------------------------------------------------
+
+    def _strip_pipe_offset(self, tk_line: int, tk_char: int) -> int:
+        """
+        Return *tk_char* adjusted for pipe-delimiter characters inserted on
+        *tk_line* before that position.  The TokenMap knows only the original
+        text, so any tkinter char offset must be reduced by the number of
+        pipe chars that precede it on the same line.
+        """
+        offset = 0
+        for i, (r_start, r_end) in enumerate(
+            zip(*[iter(self.text_widget.tag_ranges(self.PIPE_TAG))] * 2)
+        ):
+            s_line, s_char = [int(x) for x in str(r_start).split('.')]
+            e_line, e_char = [int(x) for x in str(r_end).split('.')]
+            if s_line < tk_line:
+                continue
+            if s_line > tk_line:
+                break
+            if s_char >= tk_char:
+                break
+            offset += min(e_char, tk_char) - s_char
+        return tk_char - offset
+
+    def _add_pipe_offset(self, tk_line: int, orig_char: int) -> int:
+        """
+        Inverse of *_strip_pipe_offset*: given a character position in the
+        *original* text, return the corresponding position in the widget text
+        (which contains inserted pipe-delimiter characters).
+        """
+        offset = 0
+        for r_start, r_end in zip(
+            *[iter(self.text_widget.tag_ranges(self.PIPE_TAG))] * 2
+        ):
+            s_line, s_char = [int(x) for x in str(r_start).split('.')]
+            e_line, e_char = [int(x) for x in str(r_end).split('.')]
+            if s_line < tk_line:
+                continue
+            if s_line > tk_line:
+                break
+            pipe_len = e_char - s_char
+            # This pipe range starts at s_char in widget text.  In original
+            # text that corresponds to (s_char - offset).  If the original
+            # position is at or past that point the pipe precedes it.
+            if (s_char - offset) > orig_char:
+                break
+            offset += pipe_len
+        return orig_char + offset
+
+    # ------------------------------------------------------------------
+    # Style-span pipe delimiters
+    # ------------------------------------------------------------------
+
+    def _insert_style_pipes(self) -> None:
+        """Insert | at the boundaries of styled (bold/italic/underline) spans."""
+        if self.token_map is None:
+            return
+
+        styled_internals = {
+            lc.internal for lc in self.config.labels.values() if lc.style
+        }
+        if not styled_internals:
+            return
+
+        # Collect open ([) and close (]) positions separately
+        open_positions: set = set()
+        close_positions: set = set()
+        for ann in self.annotation_set.annotations:
+            if not ann.labels or not (ann.labels & styled_internals):
+                continue
+            start_cr = self.token_map.token_char_range(ann.line, ann.start_token)
+            end_cr = self.token_map.token_char_range(ann.line, ann.end_token)
+            if start_cr and end_cr:
+                tk_line = ann.line + 1
+                open_positions.add((tk_line, start_cr[0]))
+                close_positions.add((tk_line, end_cr[1] + 1))
+
+        if not open_positions and not close_positions:
+            return
+
+        # Merge all positions; where close and open coincide, emit '] [' as one insert
+        all_pos = open_positions | close_positions
+        for pos in sorted(all_pos, reverse=True):
+            is_open = pos in open_positions
+            is_close = pos in close_positions
+            if is_open and is_close:
+                text = '] ['
+            elif is_close:
+                text = '] '
+            else:
+                text = ' ['
+            self.text_widget.insert(f"{pos[0]}.{pos[1]}", text, self.PIPE_TAG)
+
+    def _propagate_tags_to_pipes(self) -> None:
+        """Extend annotation tags onto pipe delimiters and adjacent whitespace.
+
+        For each pipe range, find the adjacent annotated character (inside the
+        bracketed span) and copy its annotation tags onto the pipe characters
+        **plus** any whitespace between the pipe and the neighbouring text, so
+        the highlight is visually continuous.
+        """
+        annotation_prefixes = ('lbl_', 'combo_')
+        pipe_ranges = self.text_widget.tag_ranges(self.PIPE_TAG)
+        for i in range(0, len(pipe_ranges), 2):
+            r_start = str(pipe_ranges[i])
+            r_end = str(pipe_ranges[i + 1])
+            content = self.text_widget.get(r_start, r_end)
+
+            if '[' in content:
+                # Inherit tags from the character right after the bracket
+                # and extend backward to cover whitespace before it.
+                ext_start = r_start
+                while True:
+                    prev = self.text_widget.index(f"{ext_start}-1c")
+                    if prev == ext_start:
+                        break
+                    ch = self.text_widget.get(prev, ext_start)
+                    if ch.isspace() and ch != '\n':
+                        ext_start = prev
+                    else:
+                        break
+                for tag in self.text_widget.tag_names(r_end):
+                    if tag.startswith(annotation_prefixes) or tag == self.MULTI_LABEL_TAG:
+                        self.text_widget.tag_add(tag, ext_start, r_end)
+
+            if ']' in content:
+                # Inherit tags from the character right before the bracket
+                # and extend forward to cover whitespace after it.
+                ext_end = r_end
+                while True:
+                    ch = self.text_widget.get(ext_end, f"{ext_end}+1c")
+                    if ch.isspace() and ch != '\n':
+                        ext_end = self.text_widget.index(f"{ext_end}+1c")
+                    else:
+                        break
+                for tag in self.text_widget.tag_names(f"{r_start}-1c"):
+                    if tag.startswith(annotation_prefixes) or tag == self.MULTI_LABEL_TAG:
+                        self.text_widget.tag_add(tag, r_start, ext_end)
+
+    # ------------------------------------------------------------------
     # Mouse selection → token-snapping
     # ------------------------------------------------------------------
 
-    def _on_mouse_click(self, _event: tk.Event) -> None:
-        """Clear stored span on a fresh click."""
+    def _on_mouse_click(self, event: tk.Event) -> None:
+        """Clear stored span on a fresh click and record the drag anchor."""
         self.current_span = None
+        self._drag_anchor = self.text_widget.index(f"@{event.x},{event.y}")
+        self.text_widget.config(selectbackground=self.SELECT_DEFAULT_BG)
 
     def _on_mouse_release(self, _event: tk.Event) -> None:
         """Schedule snap after the Text widget finishes updating the selection."""
@@ -604,7 +763,10 @@ class AnnotationApp:
         if self.current_span is not None:
             return  # Selection is active; box is managed by _restore_selection
         tk_index = self.text_widget.index(f"@{event.x},{event.y}")
-        slate_line, token = self.token_map.tk_to_slate(tk_index)
+        tk_line_i, tk_char_i = [int(x) for x in tk_index.split('.')]
+        slate_line = tk_line_i - 1
+        adj_char = self._strip_pipe_offset(tk_line_i, tk_char_i)
+        token = self.token_map.char_to_token(slate_line, adj_char)
         if token is None:
             self._update_cursor_tags([])
             return
@@ -654,9 +816,31 @@ class AnnotationApp:
             end_sl -= 1
             end_tk_char = len(self.token_map.raw_lines[end_sl])
 
+        # Subtract any pipe-delimiter characters inserted before each position
+        # so that the offsets match the original text that TokenMap knows about.
+        start_tk_char = self._strip_pipe_offset(start_tk_line, start_tk_char)
+        end_tk_char   = self._strip_pipe_offset(end_tk_line,   end_tk_char)
+
+        # --- Determine drag direction from stored anchor -------------------
+        # Anchor is at sel.first for L→R drags, sel.last for R→L drags.
+        anchor = getattr(self, '_drag_anchor', None)
+        ltr = True  # default: left-to-right
+        if anchor:
+            try:
+                ltr = self.text_widget.compare(anchor, '<=', raw_end)
+            except tk.TclError:
+                pass
+
         # --- Resolve tokens -----------------------------------------------
-        start_tok = self.token_map.char_to_token(start_sl, start_tk_char)
-        end_tok   = self.token_map.char_to_token(end_sl,   end_tk_char)
+        # sel.last is exclusive, so subtract 1 to get the actual last char.
+        # L→R: floor-snap the end (don't overshoot right into the next token).
+        # R→L: ceiling-snap the start (don't overshoot left into the prev token).
+        if ltr:
+            start_tok = self.token_map.char_to_token(start_sl, start_tk_char, snap='nearest')
+            end_tok   = self.token_map.char_to_token(end_sl, max(0, end_tk_char - 1), snap='floor')
+        else:
+            start_tok = self.token_map.char_to_token(start_sl, start_tk_char, snap='ceiling')
+            end_tok   = self.token_map.char_to_token(end_sl, max(0, end_tk_char - 1), snap='nearest')
 
         # If the start line has no tokens, advance to the next line that does
         if start_tok is None:
@@ -691,8 +875,10 @@ class AnnotationApp:
         start_cr = self.token_map.token_char_range(start_sl, start_tok)
         end_cr   = self.token_map.token_char_range(end_sl,   end_tok)
         if start_cr and end_cr:
-            tk_sel_start = f"{start_sl + 1}.{start_cr[0]}"
-            tk_sel_end   = f"{end_sl   + 1}.{end_cr[1] + 1}"
+            adj_start = self._add_pipe_offset(start_sl + 1, start_cr[0])
+            adj_end   = self._add_pipe_offset(end_sl   + 1, end_cr[1] + 1)
+            tk_sel_start = f"{start_sl + 1}.{adj_start}"
+            tk_sel_end   = f"{end_sl   + 1}.{adj_end}"
             self.text_widget.tag_remove('sel', '1.0', 'end')
             self.text_widget.tag_add('sel', tk_sel_start, tk_sel_end)
 
@@ -723,6 +909,19 @@ class AnnotationApp:
 
         # Save undo snapshot before mutating
         self.undo_stack.append(self.annotation_set.copy())
+
+        # Mutual-exclusion: if this label belongs to a group, remove any
+        # other labels from the same group on tokens covered by the span.
+        if lc.group and lc.group in self.config.groups:
+            rivals = self.config.groups[lc.group] - {lc.internal}
+            if rivals:
+                for ann in list(self.annotation_set.annotations):
+                    if ann.overlaps_span_range(start_sl, start_tok, end_sl, end_tok):
+                        removed = ann.labels & rivals
+                        if removed:
+                            ann.labels -= removed
+                            if not ann.labels:
+                                self.annotation_set.annotations.remove(ann)
 
         if start_sl == end_sl:
             # Single-line toggle
@@ -766,6 +965,7 @@ class AnnotationApp:
 
         self._redraw_annotations()
         self.has_unsaved = True
+        self.text_widget.config(selectbackground=self.SELECT_LABELLED_BG)
         self._restore_selection()
         self.status_var.set(f"{action} label '{lc.name}' [{lc.key}]")
 
@@ -853,8 +1053,10 @@ class AnnotationApp:
         start_cr = self.token_map.token_char_range(start_sl, start_tok)
         end_cr   = self.token_map.token_char_range(end_sl,   end_tok)
         if start_cr and end_cr:
-            tk_sel_start = f"{start_sl + 1}.{start_cr[0]}"
-            tk_sel_end   = f"{end_sl   + 1}.{end_cr[1] + 1}"
+            adj_start = self._add_pipe_offset(start_sl + 1, start_cr[0])
+            adj_end   = self._add_pipe_offset(end_sl   + 1, end_cr[1] + 1)
+            tk_sel_start = f"{start_sl + 1}.{adj_start}"
+            tk_sel_end   = f"{end_sl   + 1}.{adj_end}"
             self.text_widget.tag_remove('sel', '1.0', 'end')
             self.text_widget.tag_add('sel', tk_sel_start, tk_sel_end)
             self.text_widget.tag_raise('sel')
@@ -1004,8 +1206,7 @@ def run_app(
     files: List[str],
     output_dir: Optional[str],
     annotator: str,
-    resume: bool,
 ) -> None:
     root = tk.Tk()
-    _app = AnnotationApp(root, config, files, output_dir, annotator, resume)
+    _app = AnnotationApp(root, config, files, output_dir, annotator)
     root.mainloop()

@@ -149,7 +149,7 @@ The configuration file tells the tool what labels to use, which key activates ea
 ```
 # Lines starting with # are comments and are ignored
 # Blank lines are also ignored
-# Format: Label:  <name>  <key>  <colour_or_style>
+# Format: Label:  <name>  <key>  <colour_or_style>  [group="<group>"]
 
 Label:  PER     p   #e74c3c
 Label:  ORG     o   #3498db
@@ -158,13 +158,14 @@ Label:  DATE    d   #e67e22
 Label:  MISC    m   #9b59b6
 ```
 
-Each `Label:` line has three fields (whitespace-separated):
+Each `Label:` line has three required fields and one optional field (whitespace-separated):
 
 | Field | Description | Example |
 |---|---|---|
 | `name` | The label identifier. Appears in annotation files as `label:<name>`. | `PER` |
 | `key` | A **single character** key the annotator presses to apply the label. | `p` |
 | `colour_or_style` | A colour name, hex code, or text style for how the label is displayed. | `red`, `#e74c3c`, or `bold` |
+| `group="<group>"` | *(Optional)* Mutual-exclusion group. Labels in the same group cannot coexist on the same token — applying one automatically removes any other label from that group. | `group="dimension"` |
 
 ### Supported colour names
 
@@ -194,6 +195,21 @@ Label:  MISC    m   #9b59b6
 ```
 
 > **Note:** When a span carries multiple labels, one of which uses a text style, the style is applied alongside the grey multi-label highlight.
+
+### Mutual-exclusion groups
+
+Labels that share a `group` are mutually exclusive: applying one to a token automatically removes any other label from the same group on that token. This is useful when a set of labels represents alternatives (e.g. categories that cannot overlap).
+
+```
+# SELF, TASK, PROC, and SREG are mutually exclusive
+Label:  SELF    q   #e67e22  group="dimension"
+Label:  TASK    w   #9b59b6  group="dimension"
+Label:  PROC    e   #00ff04  group="dimension"
+Label:  SREG    r   #00f7ff  group="dimension"
+
+# F-UP has no group, so it can coexist with any of the above
+Label:  F-UP    1   italic
+```
 
 ### Rules
 
@@ -225,7 +241,7 @@ python3 -m annotation_tool -f <folder> -c <config> [options]
 |---|---|
 | `-o`, `--output DIR` | Directory where `.annotations` files are written. Defaults to the same folder as the input files. |
 | `-a`, `--annotator NAME` | Annotator identifier. Shown in the header bar and used in output filenames so multiple annotators can work on the same files independently (see [Multi-Annotator Workflows](#multi-annotator-workflows)). |
-| `--resume` | Load any existing `.annotations` files and continue editing them, rather than starting fresh. |
+
 
 ### Examples
 
@@ -238,9 +254,6 @@ python3 -m annotation_tool -f ./texts -c config.txt -o ./annotations
 
 # Named annotator with a dedicated output folder
 python3 -m annotation_tool -f ./texts -c config.txt -o ./annotations -a alice
-
-# Resume a previous session (re-loads existing annotations)
-python3 -m annotation_tool -f ./texts -c config.txt -o ./annotations -a alice --resume
 ```
 
 ---
@@ -325,7 +338,7 @@ These can then be compared or adjudicated using slate's built-in tools (inter-an
 
 **You can apply multiple labels to the same span.** Press different label keys on the same selection. Spans with more than one label are shown in grey with underlining; the legend identifies these as "multi" overlaps.
 
-**Resuming a session.** If you close the tool and want to continue later, re-run the same command with `--resume`. Without `--resume`, any existing `.annotations` files are still loaded and displayed — `--resume` simply makes this explicit and is useful as a reminder in scripts.
+**Resuming a session.** If you close the tool and want to continue later, simply re-run the same command. Existing `.annotations` files are automatically loaded and displayed.
 
 **The text cannot be edited.** The tool is read-only with respect to the source documents. Only annotations are written to disk.
 

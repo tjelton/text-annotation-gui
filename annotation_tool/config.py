@@ -2,17 +2,23 @@
 config.py — Parse the label configuration file.
 
 Config file format (lines starting with # are comments):
-    Label:  <name>  <key>  <colour_or_style>
+    Label:  <name>  <key>  <colour_or_style>  [group="<group>"]
 
 The fourth field can be:
   - A colour: named (e.g. red, blue) or hex (#RRGGBB / #RGB)
   - A text style: bold, italic, or underline
+
+An optional fifth field, group="<group>", makes labels in the same group
+mutually exclusive: applying one automatically removes any other label
+from the same group on the affected tokens.
 
 Example:
     Label:  F-UP    f   red
     Label:  F-BK    b   #3498db
     Label:  PER     p   italic
     Label:  DATE    d   bold
+    Label:  SELF    q   #e67e22  group="regulation"
+    Label:  TASK    w   #9b59b6  group="regulation"
 """
 
 import re
@@ -56,6 +62,7 @@ class LabelConfig:
     colour: Optional[str]    # Hex colour string, e.g. "#e74c3c" (None for style-based)
     style: Optional[str]     # "bold", "italic", or "underline" (None for colour-based)
     tag: str                 # tkinter tag name (safe for use as tag identifier)
+    group: Optional[str] = None  # Mutual-exclusion group name, e.g. "regulation"
 
 
 class Config:
@@ -64,6 +71,8 @@ class Config:
         self.labels: Dict[str, LabelConfig] = {}
         # internal name (e.g. "label:F-UP") → LabelConfig
         self.internal_to_config: Dict[str, LabelConfig] = {}
+        # group name → set of internal label names in that group
+        self.groups: Dict[str, set] = {}
 
     @classmethod
     def from_file(cls, filepath: str) -> 'Config':
@@ -108,6 +117,12 @@ class Config:
                     hex_colour = _resolve_colour(colour, lineno)
                     style = None
 
+                # Check for optional group="..." field
+                group = None
+                group_match = re.search(r'group="([^"]+)"', line)
+                if group_match:
+                    group = group_match.group(1)
+
                 internal = f"label:{name}"
                 # Tag name must be safe for tkinter (no : - special chars)
                 tag = 'lbl_' + re.sub(r'[^A-Za-z0-9_]', '_', name)
@@ -115,9 +130,12 @@ class Config:
                 lc = LabelConfig(
                     name=name, internal=internal,
                     key=key, colour=hex_colour, style=style, tag=tag,
+                    group=group,
                 )
                 config.labels[key] = lc
                 config.internal_to_config[internal] = lc
+                if group:
+                    config.groups.setdefault(group, set()).add(internal)
 
         if not config.labels:
             raise ValueError("Config file defines no labels")

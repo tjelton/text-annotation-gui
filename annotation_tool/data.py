@@ -84,11 +84,16 @@ class TokenMap:
             return len(self.tokens[slate_line])
         return 0
 
-    def char_to_token(self, slate_line: int, char_offset: int) -> Optional[int]:
+    def char_to_token(self, slate_line: int, char_offset: int,
+                      snap: str = 'nearest') -> Optional[int]:
         """
         Return the token index whose character range contains *char_offset*
-        on *slate_line*, or the nearest token if the offset is in whitespace.
-        Returns None if the line has no tokens.
+        on *slate_line*.  Returns None if the line has no tokens.
+
+        *snap* controls behaviour when *char_offset* falls in whitespace:
+          'nearest'  – pick whichever adjacent token boundary is closer (default)
+          'floor'    – always pick the previous token (do not overshoot right)
+          'ceiling'  – always pick the next token (do not overshoot left)
         """
         if slate_line < 0 or slate_line >= len(self.token_ranges):
             return None
@@ -102,8 +107,12 @@ class TokenMap:
             if char_offset < start:
                 # We're in whitespace before token i
                 if i == 0:
-                    return 0
-                # Choose whichever token boundary is closer
+                    return 0                      # nothing to the left
+                if snap == 'floor':
+                    return i - 1
+                if snap == 'ceiling':
+                    return i
+                # nearest: choose whichever boundary is closer
                 prev_end = ranges[i - 1][1]
                 if (char_offset - prev_end) < (start - char_offset):
                     return i - 1
@@ -178,6 +187,18 @@ class Annotation:
             return False
         s, e = min(start, end), max(start, end)
         return not (self.end_token < s or self.start_token > e)
+
+    def overlaps_span_range(
+        self, start_line: int, start_tok: int, end_line: int, end_tok: int,
+    ) -> bool:
+        """Return True if this annotation overlaps the multi-line span."""
+        if self.line < start_line or self.line > end_line:
+            return False
+        if self.line == start_line and self.end_token < start_tok:
+            return False
+        if self.line == end_line and self.start_token > end_tok:
+            return False
+        return True
 
     def sort_key(self) -> Tuple[int, int, int]:
         return (self.line, self.start_token, self.end_token)
