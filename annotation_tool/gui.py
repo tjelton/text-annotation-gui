@@ -16,6 +16,7 @@ Layout (top to bottom):
 """
 
 import os
+import sys
 import tkinter as tk
 from tkinter import messagebox
 import tkinter.font as tkfont
@@ -327,7 +328,9 @@ class AnnotationApp:
         keysym = event.keysym         # e.g. 'f', 'bracketright', 'Escape'
         char   = event.char           # e.g. 'f', ']', ''
         ctrl   = bool(event.state & 0x4)   # Ctrl held
-        cmd    = bool(event.state & 0x8)   # Command (macOS) held
+        # On Windows, bit 0x8 is Num Lock (not Command), so gate this to macOS
+        # or every keypress would be treated as Cmd-held when Num Lock is on.
+        cmd    = sys.platform == 'darwin' and bool(event.state & 0x8)
 
         # --- Ctrl / Cmd shortcuts ----------------------------------------
         if ctrl or cmd:
