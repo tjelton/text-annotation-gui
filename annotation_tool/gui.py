@@ -487,41 +487,62 @@ class AnnotationApp:
         for combo_tag in self._combo_tags.values():
             self.text_widget.tag_remove(combo_tag, '1.0', 'end')
 
-        # Build per-token label sets: (slate_line, token) → set of internal label names
+        # Build per-token label sets and annotation-identity sets:
+        # (slate_line, token) → set of internal label names
+        # (slate_line, token) → frozenset of annotation ids (to detect span boundaries)
         pos_labels: dict = {}
+        pos_ann_ids: dict = {}
         for ann in self.annotation_set.annotations:
             if not ann.labels:
                 continue
-            for tok in range(ann.start_token, ann.end_token + 1):
-                key = (ann.line, tok)
-                if key not in pos_labels:
-                    pos_labels[key] = set()
-                pos_labels[key].update(ann.labels)
+            ann_id = id(ann)
+            for sl in range(ann.line, ann.end_line + 1):
+                n = self.token_map.num_tokens(sl)
+                if n == 0:
+                    continue
+                if sl == ann.line and sl == ann.end_line:
+                    tok_start, tok_end = ann.start_token, ann.end_token
+                elif sl == ann.line:
+                    tok_start, tok_end = ann.start_token, n - 1
+                elif sl == ann.end_line:
+                    tok_start, tok_end = 0, ann.end_token
+                else:
+                    tok_start, tok_end = 0, n - 1
+                for tok in range(tok_start, tok_end + 1):
+                    key = (sl, tok)
+                    if key not in pos_labels:
+                        pos_labels[key] = set()
+                        pos_ann_ids[key] = set()
+                    pos_labels[key].update(ann.labels)
+                    pos_ann_ids[key].add(ann_id)
 
         # Resolve each token position to a tag name
-        line_tok_tags: dict = {}  # slate_line → {token: tag_name}
+        line_tok_tags: dict = {}  # slate_line → {token: (tag_name, ann_key)}
         for (sl, tok), labels in pos_labels.items():
             if sl not in line_tok_tags:
                 line_tok_tags[sl] = {}
             tag = self._resolve_tag(labels)
             if tag:
-                line_tok_tags[sl][tok] = tag
+                ann_key = frozenset(pos_ann_ids[(sl, tok)])
+                line_tok_tags[sl][tok] = (tag, ann_key)
 
-        # Apply tags, merging contiguous runs of the same tag to fill gaps
+        # Apply tags, merging contiguous runs of the same tag to fill gaps.
+        # Break runs at annotation boundaries so adjacent same-label spans
+        # remain visually distinct.
         for sl, tok_tags in line_tok_tags.items():
             sorted_toks = sorted(tok_tags.keys())
             if not sorted_toks:
                 continue
             run_start = sorted_toks[0]
-            run_tag = tok_tags[run_start]
+            run_tag, run_ann = tok_tags[run_start]
             prev = run_start
             for tok in sorted_toks[1:]:
-                cur_tag = tok_tags[tok]
-                if tok == prev + 1 and cur_tag == run_tag:
+                cur_tag, cur_ann = tok_tags[tok]
+                if tok == prev + 1 and cur_tag == run_tag and cur_ann == run_ann:
                     prev = tok
                 else:
                     self._apply_tag_run(sl, run_start, prev, run_tag)
-                    run_start, run_tag, prev = tok, cur_tag, tok
+                    run_start, run_tag, run_ann, prev = tok, cur_tag, cur_ann, tok
             self._apply_tag_run(sl, run_start, prev, run_tag)
 
         # Insert pipe delimiters at boundaries of styled (bold/italic/underline) spans
@@ -660,7 +681,7 @@ class AnnotationApp:
     # ------------------------------------------------------------------
 
     def _insert_style_pipes(self) -> None:
-        """Insert | at the boundaries of styled (bold/italic/underline) spans."""
+        """Insert [ ] at the boundaries of styled (bold/italic/underline) spans."""
         if self.token_map is None:
             return
 
@@ -670,18 +691,18 @@ class AnnotationApp:
         if not styled_internals:
             return
 
-        # Collect open ([) and close (]) positions separately
+        # Collect open ([) and close (]) positions separately.
+        # For multi-line annotations, [ goes on the start line, ] on the end line.
         open_positions: set = set()
         close_positions: set = set()
         for ann in self.annotation_set.annotations:
             if not ann.labels or not (ann.labels & styled_internals):
                 continue
             start_cr = self.token_map.token_char_range(ann.line, ann.start_token)
-            end_cr = self.token_map.token_char_range(ann.line, ann.end_token)
+            end_cr = self.token_map.token_char_range(ann.end_line, ann.end_token)
             if start_cr and end_cr:
-                tk_line = ann.line + 1
-                open_positions.add((tk_line, start_cr[0]))
-                close_positions.add((tk_line, end_cr[1] + 1))
+                open_positions.add((ann.line + 1, start_cr[0]))
+                close_positions.add((ann.end_line + 1, end_cr[1] + 1))
 
         if not open_positions and not close_positions:
             return
@@ -926,73 +947,17 @@ class AnnotationApp:
                             if not ann.labels:
                                 self.annotation_set.annotations.remove(ann)
 
-        if start_sl == end_sl:
-            # Single-line toggle
-            added = self.annotation_set.toggle_label(
-                start_sl, start_tok, end_tok, lc.internal
-            )
-            action = 'Added' if added else 'Removed'
-        else:
-            # Multi-line: determine global toggle direction.
-            # If ALL per-line spans already carry the label → remove;
-            # otherwise → add everywhere.
-            all_have = self._multiline_all_have(
-                start_sl, start_tok, end_sl, end_tok, lc.internal
-            )
-
-            for line in range(start_sl, end_sl + 1):
-                n = self.token_map.num_tokens(line)
-                if n == 0:
-                    continue
-                if line == start_sl:
-                    s, e = start_tok, n - 1
-                elif line == end_sl:
-                    s, e = 0, end_tok
-                else:
-                    s, e = 0, n - 1
-
-                if all_have:
-                    # Remove the label from this span
-                    ann = self.annotation_set.get_at_span(line, s, e)
-                    if ann and lc.internal in ann.labels:
-                        ann.labels.discard(lc.internal)
-                        if not ann.labels:
-                            self.annotation_set.annotations.remove(ann)
-                else:
-                    # Add if not present; use toggle which will add
-                    existing = self.annotation_set.get_at_span(line, s, e)
-                    if existing is None or lc.internal not in existing.labels:
-                        self.annotation_set.toggle_label(line, s, e, lc.internal)
-
-            action = 'Removed' if all_have else 'Applied'
+        added = self.annotation_set.toggle_label(
+            start_sl, start_tok, end_tok, lc.internal,
+            end_line=end_sl if start_sl != end_sl else None,
+        )
+        action = 'Added' if added else 'Removed'
 
         self._redraw_annotations()
         self.has_unsaved = True
         self.text_widget.config(selectbackground=self.SELECT_LABELLED_BG)
         self._restore_selection()
         self.status_var.set(f"{action} label '{lc.name}' [{lc.key}]")
-
-    def _multiline_all_have(
-        self,
-        start_sl: int, start_tok: int,
-        end_sl: int,   end_tok: int,
-        label: str,
-    ) -> bool:
-        """Return True if every per-line span in the selection already has *label*."""
-        for line in range(start_sl, end_sl + 1):
-            n = self.token_map.num_tokens(line)
-            if n == 0:
-                continue
-            if line == start_sl:
-                s, e = start_tok, n - 1
-            elif line == end_sl:
-                s, e = 0, end_tok
-            else:
-                s, e = 0, n - 1
-            ann = self.annotation_set.get_at_span(line, s, e)
-            if ann is None or label not in ann.labels:
-                return False
-        return True
 
     # ------------------------------------------------------------------
     # Remove-all action ('u')
@@ -1006,20 +971,9 @@ class AnnotationApp:
 
         start_sl, start_tok, end_sl, end_tok = self.current_span
         self.undo_stack.append(self.annotation_set.copy())
-
-        for line in range(start_sl, end_sl + 1):
-            n = self.token_map.num_tokens(line)
-            if n == 0:
-                continue
-            if line == start_sl and line == end_sl:
-                s, e = start_tok, end_tok
-            elif line == start_sl:
-                s, e = start_tok, n - 1
-            elif line == end_sl:
-                s, e = 0, end_tok
-            else:
-                s, e = 0, n - 1
-            self.annotation_set.remove_overlapping(line, s, e)
+        self.annotation_set.remove_overlapping_range(
+            start_sl, start_tok, end_sl, end_tok
+        )
 
         self._redraw_annotations()
         self.has_unsaved = True
@@ -1073,15 +1027,12 @@ class AnnotationApp:
         seen = set()
         names = []
         for ann in self.annotation_set.annotations:
-            for line in range(start_sl, end_sl + 1):
-                s = start_tok if line == start_sl else 0
-                e = end_tok   if line == end_sl   else self.token_map.num_tokens(line) - 1
-                if ann.overlaps_span(line, s, e):
-                    for internal in sorted(ann.labels):
-                        if internal not in seen:
-                            seen.add(internal)
-                            lc = self.config.internal_to_config.get(internal)
-                            names.append(lc.name if lc else internal.removeprefix('label:'))
+            if ann.overlaps_span_range(start_sl, start_tok, end_sl, end_tok):
+                for internal in sorted(ann.labels):
+                    if internal not in seen:
+                        seen.add(internal)
+                        lc = self.config.internal_to_config.get(internal)
+                        names.append(lc.name if lc else internal.removeprefix('label:'))
         return names
 
     # ------------------------------------------------------------------

@@ -8,6 +8,7 @@ Tokenisation matches slate exactly:
 Annotation file format (slate-compatible):
     (line, token) - label:NAME
     ((line, start_token), (line, end_token)) - label:NAME1 label:NAME2
+    ((start_line, start_token), (end_line, end_token)) - label:NAME  (multi-line)
 """
 
 import os
@@ -162,7 +163,7 @@ class TokenMap:
 # ---------------------------------------------------------------------------
 
 class Annotation:
-    """A single-line span annotated with one or more labels."""
+    """A span (possibly multi-line) annotated with one or more labels."""
 
     def __init__(
         self,
@@ -170,59 +171,87 @@ class Annotation:
         start_token: int,
         end_token: int,
         labels: Optional[Set[str]] = None,
+        end_line: Optional[int] = None,
     ) -> None:
         self.line = line
-        self.start_token = min(start_token, end_token)
-        self.end_token = max(start_token, end_token)
+        self.end_line = end_line if end_line is not None else line
+        if self.line == self.end_line:
+            self.start_token = min(start_token, end_token)
+            self.end_token = max(start_token, end_token)
+        else:
+            self.start_token = start_token
+            self.end_token = end_token
         self.labels: Set[str] = set(labels) if labels else set()
 
     # ------------------------------------------------------------------
 
-    def matches_span(self, line: int, start: int, end: int) -> bool:
-        s, e = min(start, end), max(start, end)
-        return self.line == line and self.start_token == s and self.end_token == e
+    def matches_span(
+        self, line: int, start: int, end: int,
+        end_line: Optional[int] = None,
+    ) -> bool:
+        el = end_line if end_line is not None else line
+        if self.line == el:
+            s, e = min(start, end), max(start, end)
+        else:
+            s, e = start, end
+        return (self.line == line and self.end_line == el
+                and self.start_token == s and self.end_token == e)
 
     def overlaps_span(self, line: int, start: int, end: int) -> bool:
-        if self.line != line:
+        """Return True if this annotation overlaps the single-line query."""
+        if line < self.line or line > self.end_line:
             return False
         s, e = min(start, end), max(start, end)
-        return not (self.end_token < s or self.start_token > e)
+        if self.line == self.end_line:
+            # Single-line annotation — simple token range check
+            return not (self.end_token < s or self.start_token > e)
+        # Multi-line annotation
+        if line == self.line:
+            return e >= self.start_token
+        if line == self.end_line:
+            return s <= self.end_token
+        # Strictly between start and end lines — always overlaps
+        return True
 
     def overlaps_span_range(
         self, start_line: int, start_tok: int, end_line: int, end_tok: int,
     ) -> bool:
         """Return True if this annotation overlaps the multi-line span."""
-        if self.line < start_line or self.line > end_line:
+        if self.end_line < start_line or self.line > end_line:
             return False
-        if self.line == start_line and self.end_token < start_tok:
+        if self.end_line == start_line and self.end_token < start_tok:
             return False
         if self.line == end_line and self.start_token > end_tok:
             return False
         return True
 
-    def sort_key(self) -> Tuple[int, int, int]:
-        return (self.line, self.start_token, self.end_token)
+    def sort_key(self) -> Tuple[int, int, int, int]:
+        return (self.line, self.start_token, self.end_line, self.end_token)
 
     def to_slate_str(self) -> Optional[str]:
         if not self.labels:
             return None
         labels_part = ' '.join(sorted(self.labels))
-        if self.start_token == self.end_token:
+        if self.line == self.end_line and self.start_token == self.end_token:
             span_part = f"({self.line}, {self.start_token})"
         else:
             span_part = (
                 f"(({self.line}, {self.start_token}), "
-                f"({self.line}, {self.end_token}))"
+                f"({self.end_line}, {self.end_token}))"
             )
         return f"{span_part} - {labels_part}"
 
     def copy(self) -> 'Annotation':
         return Annotation(self.line, self.start_token, self.end_token,
-                          self.labels.copy())
+                          self.labels.copy(), end_line=self.end_line)
 
     def __repr__(self) -> str:
-        return (f"Annotation(line={self.line}, "
-                f"start={self.start_token}, end={self.end_token}, "
+        if self.line == self.end_line:
+            return (f"Annotation(line={self.line}, "
+                    f"start={self.start_token}, end={self.end_token}, "
+                    f"labels={self.labels})")
+        return (f"Annotation(line={self.line}, start={self.start_token}, "
+                f"end_line={self.end_line}, end={self.end_token}, "
                 f"labels={self.labels})")
 
 
@@ -240,11 +269,18 @@ class AnnotationSet:
     # Queries
     # ------------------------------------------------------------------
 
-    def get_at_span(self, line: int, start: int, end: int) -> Optional[Annotation]:
+    def get_at_span(
+        self, line: int, start: int, end: int,
+        end_line: Optional[int] = None,
+    ) -> Optional[Annotation]:
         """Find the annotation at this exact span, or None."""
-        s, e = min(start, end), max(start, end)
+        el = end_line if end_line is not None else line
+        if line == el:
+            s, e = min(start, end), max(start, end)
+        else:
+            s, e = start, end
         for ann in self.annotations:
-            if ann.matches_span(line, s, e):
+            if ann.matches_span(line, s, e, end_line=el):
                 return ann
         return None
 
@@ -252,12 +288,15 @@ class AnnotationSet:
     # Mutations
     # ------------------------------------------------------------------
 
-    def toggle_label(self, line: int, start: int, end: int, label: str) -> bool:
+    def toggle_label(
+        self, line: int, start: int, end: int, label: str,
+        end_line: Optional[int] = None,
+    ) -> bool:
         """
-        Toggle *label* on the span (line, start–end).
+        Toggle *label* on the span (line, start) – (end_line, end).
         Returns True if the label was added, False if it was removed.
         """
-        existing = self.get_at_span(line, start, end)
+        existing = self.get_at_span(line, start, end, end_line=end_line)
         if existing is not None:
             if label in existing.labels:
                 existing.labels.discard(label)
@@ -268,7 +307,9 @@ class AnnotationSet:
                 existing.labels.add(label)
                 return True
         else:
-            self.annotations.append(Annotation(line, start, end, {label}))
+            self.annotations.append(
+                Annotation(line, start, end, {label}, end_line=end_line)
+            )
             return True
 
     def remove_overlapping(self, line: int, start: int, end: int) -> None:
@@ -277,6 +318,15 @@ class AnnotationSet:
         self.annotations = [
             a for a in self.annotations
             if not a.overlaps_span(line, s, e)
+        ]
+
+    def remove_overlapping_range(
+        self, start_line: int, start_tok: int, end_line: int, end_tok: int,
+    ) -> None:
+        """Remove every annotation that overlaps the multi-line span."""
+        self.annotations = [
+            a for a in self.annotations
+            if not a.overlaps_span_range(start_line, start_tok, end_line, end_tok)
         ]
 
     # ------------------------------------------------------------------
@@ -318,9 +368,10 @@ class AnnotationSet:
                 parsed = _parse_span(span_str.strip())
                 if parsed is None:
                     continue
-                line, start_tok, end_tok = parsed
+                start_line, start_tok, end_line, end_tok = parsed
                 ann_set.annotations.append(
-                    Annotation(line, start_tok, end_tok, labels)
+                    Annotation(start_line, start_tok, end_tok, labels,
+                               end_line=end_line)
                 )
         return ann_set
 
@@ -338,20 +389,20 @@ class AnnotationSet:
 # Internal helpers
 # ---------------------------------------------------------------------------
 
-def _parse_span(span_str: str) -> Optional[Tuple[int, int, int]]:
+def _parse_span(span_str: str) -> Optional[Tuple[int, int, int, int]]:
     """
-    Safely parse a span string into (line, start_token, end_token).
+    Safely parse a span string into (start_line, start_token, end_line, end_token).
     Accepts:
         (line, token)
-        ((line, start), (line, end))
+        ((start_line, start_token), (end_line, end_token))
     """
     # Single token: (line, token)
     m = re.match(r'^\(\s*(\d+)\s*,\s*(\d+)\s*\)$', span_str)
     if m:
         line, tok = int(m.group(1)), int(m.group(2))
-        return (line, tok, tok)
+        return (line, tok, line, tok)
 
-    # Span: ((line, start), (line, end))
+    # Span: ((start_line, start), (end_line, end))
     m = re.match(
         r'^\(\s*\(\s*(\d+)\s*,\s*(\d+)\s*\)\s*,'
         r'\s*\(\s*(\d+)\s*,\s*(\d+)\s*\)\s*\)$',
@@ -359,7 +410,7 @@ def _parse_span(span_str: str) -> Optional[Tuple[int, int, int]]:
     )
     if m:
         line1, start = int(m.group(1)), int(m.group(2))
-        _line2, end = int(m.group(3)), int(m.group(4))
-        return (line1, start, end)
+        line2, end = int(m.group(3)), int(m.group(4))
+        return (line1, start, line2, end)
 
     return None
