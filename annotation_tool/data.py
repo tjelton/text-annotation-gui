@@ -389,6 +389,122 @@ class AnnotationSet:
 # Internal helpers
 # ---------------------------------------------------------------------------
 
+# ---------------------------------------------------------------------------
+# Adjudication support
+# ---------------------------------------------------------------------------
+
+def find_annotator_info(
+    folder: str, txt_basenames: List[str],
+) -> Tuple[str, Dict[str, str]]:
+    """Scan *folder* for annotation files corresponding to *txt_basenames*.
+
+    Returns (annotator_name, file_map) where *file_map* maps each
+    txt basename to the full path of the matching annotation file.
+    *annotator_name* is extracted from the filename pattern
+    (e.g. ``04.txt.alice.annotations`` → ``alice``) or ``''`` if
+    no name is embedded.
+    """
+    file_map: Dict[str, str] = {}
+    name = ''
+    entries = os.listdir(folder)
+    for basename in txt_basenames:
+        for entry in entries:
+            if not entry.endswith('.annotations'):
+                continue
+            if not entry.startswith(basename):
+                continue
+            middle = entry[len(basename):-len('.annotations')].strip('.')
+            if middle and not name:
+                name = middle
+            file_map[basename] = os.path.join(folder, entry)
+            break
+    return name, file_map
+
+
+def compute_adjudication(
+    annotator_sets: List[Tuple[str, 'AnnotationSet']],
+    token_map: 'TokenMap',
+) -> Tuple['AnnotationSet', set, dict]:
+    """Compare annotations from multiple annotators for a single document.
+
+    An annotation is *agreed* when every annotator has an identical span
+    (same line, start_token, end_line, end_token) with an identical label
+    set.  Everything else is a disagreement.
+
+    Returns
+    -------
+    agreed_set : AnnotationSet
+        Annotations identical across all annotators.
+    disagreement_positions : set of (slate_line, token)
+        Token positions covered by at least one non-agreed annotation.
+    token_annotator_info : dict
+        ``{(line, token): {annotator_name: set_of_internal_labels}}``
+    """
+    if not annotator_sets:
+        return AnnotationSet(), set(), {}
+
+    def _ann_key(ann: Annotation) -> tuple:
+        return (ann.line, ann.start_token, ann.end_line, ann.end_token,
+                frozenset(ann.labels))
+
+    per_annotator_keys: List[set] = []
+    for _name, ann_set in annotator_sets:
+        keys = {_ann_key(a) for a in ann_set.annotations if a.labels}
+        per_annotator_keys.append(keys)
+
+    agreed_keys = per_annotator_keys[0]
+    for keys in per_annotator_keys[1:]:
+        agreed_keys = agreed_keys & keys
+
+    agreed_set = AnnotationSet()
+    for key in agreed_keys:
+        line, start_tok, end_line, end_tok, labels = key
+        agreed_set.annotations.append(
+            Annotation(line, start_tok, end_tok, set(labels), end_line=end_line)
+        )
+
+    def _covered_tokens(ann: Annotation) -> List[Tuple[int, int]]:
+        positions: List[Tuple[int, int]] = []
+        for sl in range(ann.line, ann.end_line + 1):
+            n = token_map.num_tokens(sl)
+            if n == 0:
+                continue
+            if sl == ann.line and sl == ann.end_line:
+                ts, te = ann.start_token, ann.end_token
+            elif sl == ann.line:
+                ts, te = ann.start_token, n - 1
+            elif sl == ann.end_line:
+                ts, te = 0, ann.end_token
+            else:
+                ts, te = 0, n - 1
+            for tok in range(ts, te + 1):
+                positions.append((sl, tok))
+        return positions
+
+    disagreement_positions: set = set()
+    token_annotator_info: dict = {}
+
+    for ann_name, ann_set in annotator_sets:
+        for ann in ann_set.annotations:
+            if not ann.labels:
+                continue
+            is_agreed = _ann_key(ann) in agreed_keys
+            for pos in _covered_tokens(ann):
+                if not is_agreed:
+                    disagreement_positions.add(pos)
+                if pos not in token_annotator_info:
+                    token_annotator_info[pos] = {}
+                if ann_name not in token_annotator_info[pos]:
+                    token_annotator_info[pos][ann_name] = set()
+                token_annotator_info[pos][ann_name].update(ann.labels)
+
+    return agreed_set, disagreement_positions, token_annotator_info
+
+
+# ---------------------------------------------------------------------------
+# Internal helpers
+# ---------------------------------------------------------------------------
+
 def _parse_span(span_str: str) -> Optional[Tuple[int, int, int, int]]:
     """
     Safely parse a span string into (start_line, start_token, end_line, end_token).

@@ -15,6 +15,7 @@ A lightweight, keyboard-driven GUI for span-level text annotation. Select text w
 - [Command-Line Reference](#command-line-reference)
 - [Output File Format](#output-file-format)
 - [Multi-Annotator Workflows](#multi-annotator-workflows)
+- [Adjudication Mode](#adjudication-mode)
 - [Tips and Common Questions](#tips-and-common-questions)
 - [Acknowledgements](#acknowledgements)
 
@@ -322,7 +323,73 @@ annotations/
   ...
 ```
 
-These can then be compared or adjudicated using slate's built-in tools (inter-annotator agreement, adjudication mode), since the file format is identical.
+These can then be compared or adjudicated using the built-in adjudication mode (see below) or slate's tools, since the file format is identical.
+
+---
+
+## Adjudication Mode
+
+When multiple annotators have independently annotated the same files, adjudication mode lets you review their work side by side and produce a single resolved ("gold") annotation set.
+
+### Launching
+
+```bash
+python3 -m annotation_tool adjudicate -f ./texts -c config.txt -p ./ann_alice ./ann_bob
+```
+
+Each `-p` path is a folder containing one annotator's `.annotations` files. The tool matches them to the `.txt` files in `-f` by basename.
+
+| Argument | Description |
+|---|---|
+| `-f`, `--folder` | Folder containing the original `.txt` files |
+| `-c`, `--config` | Path to the label configuration file (same as annotation mode) |
+| `-p`, `--paths DIR [DIR ...]` | One or more folders, each containing one annotator's `.annotations` files |
+| `-o`, `--output DIR` | *(Optional)* Directory for the adjudicated output files. Defaults to the input folder. |
+
+```bash
+# With a dedicated output folder
+python3 -m annotation_tool adjudicate -f ./texts -c config.txt -p ./ann_alice ./ann_bob -o ./adjudicated
+```
+
+### How it works
+
+The tool compares annotations across all annotators for each document:
+
+- **Agreements** — annotations where every annotator marked the exact same span with the exact same label set — are pre-loaded and shown with their normal label colours.
+- **Disagreements** — any span where annotators differ (different boundaries, different labels, or an annotation present for some annotators but not others) — are highlighted with a **red background**.
+
+The adjudicator uses the same label controls as annotation mode to resolve disagreements: select a span and press a label key to apply the final label. Agreed annotations can also be changed if needed.
+
+### Annotator names
+
+Annotator names are extracted automatically from annotation filenames. For example, `04.txt.alice.annotations` yields the name "Alice". If no name is embedded (e.g. `04.txt.annotations`), annotators are labelled "Annotator 1", "Annotator 2", etc.
+
+### Viewing individual annotators
+
+A **dropdown menu** in the header lets you switch between annotators to see exactly what each person annotated. When viewing an annotator:
+
+- Their annotations are displayed without the red disagreement highlights.
+- An **orange banner** appears above the text: *"Looking at {Name} Annotations. Click here to return back."*
+- All editing is disabled — the view is read-only.
+- Press **Escape** or click the banner to return to adjudication.
+
+### Annotator info overlay
+
+When hovering over an annotated token in adjudication mode, a floating box in the **bottom-right corner** of the text area shows what each annotator labelled at that position (e.g. "Alice: PER" / "Bob: ORG" / "Charlie: —").
+
+### Output
+
+Adjudicated annotations are saved as:
+
+```
+<input_file>.adjudications.annotations
+```
+
+For example, `01.txt.adjudications.annotations`. The file format is identical to standard annotation files.
+
+### Resuming
+
+If you close the tool and reopen it with the same command, existing `.adjudications.annotations` files are loaded automatically so you can continue where you left off.
 
 ---
 

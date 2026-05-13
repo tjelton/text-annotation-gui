@@ -23,7 +23,7 @@ import tkinter.font as tkfont
 from typing import List, Optional, Tuple
 
 from .config import Config, LabelConfig
-from .data import AnnotationSet, TokenMap, get_txt_files
+from .data import AnnotationSet, TokenMap, compute_adjudication, get_txt_files
 
 
 # ---------------------------------------------------------------------------
@@ -51,6 +51,8 @@ class AnnotationApp:
     MULTI_LABEL_COLOUR = '#7f8c8d'
     MULTI_LABEL_TAG    = 'multi_lbl'
     PIPE_TAG           = '_pipe_delim'
+    DISAGREEMENT_TAG   = '_disagreement'
+    DISAGREEMENT_COLOUR = '#e74c3c'
     SELECT_DEFAULT_BG  = '#aed6f1'
     SELECT_LABELLED_BG = '#a8e6cf'
 
@@ -61,6 +63,7 @@ class AnnotationApp:
         files: List[str],
         output_dir: Optional[str],
         annotator: str,
+        adjudication_annotators: Optional[List[tuple]] = None,
     ) -> None:
         self.root = root
         self.config = config
@@ -84,6 +87,18 @@ class AnnotationApp:
         # Cache for composite style tags (used when multiple style labels overlap)
         self._combo_tags: dict = {}
 
+        # Adjudication mode
+        self._adjudication_mode: bool = adjudication_annotators is not None
+        self._adjudication_annotators: list = adjudication_annotators or []
+        self._annotator_names: List[str] = [
+            name for name, _ in self._adjudication_annotators
+        ]
+        self._disagreement_positions: set = set()
+        self._token_annotator_info: dict = {}
+        self._viewing_annotator: Optional[str] = None
+        self._saved_annotation_set: Optional[AnnotationSet] = None
+        self._annotator_sets_cache: dict = {}  # name → AnnotationSet for current file
+
         self._build_ui()
         self._configure_tags()
         self._bind_keys()
@@ -94,7 +109,10 @@ class AnnotationApp:
     # ------------------------------------------------------------------
 
     def _build_ui(self) -> None:
-        self.root.title("Annotation Tool")
+        if self._adjudication_mode:
+            self.root.title("Adjudication Tool")
+        else:
+            self.root.title("Annotation Tool")
         self.root.geometry("960x740")
         self.root.minsize(640, 480)
         self.root.configure(bg='#2c3e50')
@@ -152,6 +170,21 @@ class AnnotationApp:
             font=('Helvetica', 11),
         )
         btn_help.pack(side='left', padx=6)
+
+        # ── View-annotator dropdown (adjudication mode only) ──────
+        if self._adjudication_mode:
+            self._view_var = tk.StringVar(value='Adjudication')
+            choices = ['Adjudication'] + self._annotator_names
+            self._view_menu = tk.OptionMenu(
+                hdr, self._view_var, *choices,
+                command=self._on_view_changed,
+            )
+            self._view_menu.config(
+                bg='#34495e', fg='black', activebackground='#4a6278',
+                activeforeground='black', relief='flat', padx=6, pady=3,
+                font=('Helvetica', 11), highlightthickness=0,
+            )
+            self._view_menu.pack(side='left', padx=6)
 
         self.btn_next = tk.Button(
             hdr, text='Next  ▶', command=self._go_next,
@@ -238,15 +271,29 @@ class AnnotationApp:
             relief='flat', padx=4, pady=2,
         ).pack(side='left', padx=(2, 4))
 
-        # ── Text area ─────────────────────────────────────────────────
-        text_outer = tk.Frame(self.root, bg='white')
-        text_outer.pack(fill='both', expand=True, padx=0, pady=0)
+        # ── View banner (adjudication mode — shown when viewing an annotator) ──
+        if self._adjudication_mode:
+            self._view_banner = tk.Frame(self.root, bg='#f39c12', padx=8, pady=6)
+            # Not packed yet — shown/hidden dynamically
+            self._view_banner_var = tk.StringVar(value='')
+            lbl = tk.Label(
+                self._view_banner, textvariable=self._view_banner_var,
+                bg='#f39c12', fg='white',
+                font=('Helvetica', 11, 'bold'), padx=10, pady=2,
+                cursor='hand2',
+            )
+            lbl.pack(fill='x')
+            lbl.bind('<Button-1>', lambda e: self._return_to_adjudication())
 
-        scrollbar = tk.Scrollbar(text_outer)
+        # ── Text area ─────────────────────────────────────────────────
+        self._text_outer = tk.Frame(self.root, bg='white')
+        self._text_outer.pack(fill='both', expand=True, padx=0, pady=0)
+
+        scrollbar = tk.Scrollbar(self._text_outer)
         scrollbar.pack(side='right', fill='y')
 
         self.text_widget = tk.Text(
-            text_outer,
+            self._text_outer,
             wrap='word',
             font=('Helvetica', self.font_size),
             yscrollcommand=scrollbar.set,
@@ -263,6 +310,35 @@ class AnnotationApp:
         )
         self.text_widget.pack(fill='both', expand=True)
         scrollbar.config(command=self.text_widget.yview)
+
+        # ── Annotator info overlay (adjudication mode, bottom-right of text area)
+        if self._adjudication_mode:
+            self._ann_info_frame = tk.Frame(
+                self._text_outer, bg='#2c3e50', padx=8, pady=6,
+                relief='solid', bd=1,
+            )
+            self._ann_info_label = tk.Label(
+                self._ann_info_frame, text='',
+                bg='#2c3e50', fg='white', justify='left', anchor='w',
+                font=('Helvetica', self.font_size), padx=4, pady=2,
+            )
+            self._ann_info_label.pack()
+            # Hidden by default; placed when there is info to show
+            self._ann_info_visible = False
+            self._text_outer.bind('<Configure>', self._reposition_ann_info)
+
+    def _reposition_ann_info(self, _event=None) -> None:
+        """Keep the annotator info overlay anchored to the bottom-right."""
+        if not self._adjudication_mode or not self._ann_info_visible:
+            return
+        self._ann_info_frame.update_idletasks()
+        fw = self._ann_info_frame.winfo_reqwidth()
+        fh = self._ann_info_frame.winfo_reqheight()
+        pw = self._text_outer.winfo_width()
+        ph = self._text_outer.winfo_height()
+        x = pw - fw - 20   # 20px from right edge (room for scrollbar)
+        y = ph - fh - 8
+        self._ann_info_frame.place(x=max(0, x), y=max(0, y))
 
     # ------------------------------------------------------------------
     # Tag configuration
@@ -297,6 +373,13 @@ class AnnotationApp:
             font=('Helvetica', self.font_size),
             foreground='#888888',
         )
+        # Disagreement highlight (adjudication mode)
+        if self._adjudication_mode:
+            self.text_widget.tag_configure(
+                self.DISAGREEMENT_TAG,
+                background=self.DISAGREEMENT_COLOUR,
+                foreground='white',
+            )
         # Ensure the selection highlight (sel) always appears on top
         self.text_widget.tag_raise('sel')
 
@@ -314,7 +397,7 @@ class AnnotationApp:
         self.text_widget.bind('<ButtonRelease-1>', self._on_mouse_release)
         self.text_widget.bind('<Button-1>', self._on_mouse_click)
         self.text_widget.bind('<Motion>', self._on_mouse_motion)
-        self.text_widget.bind('<Leave>', lambda e: self._update_cursor_tags([]))
+        self.text_widget.bind('<Leave>', self._on_mouse_leave)
 
         # Window close
         self.root.protocol('WM_DELETE_WINDOW', self._quit)
@@ -335,9 +418,9 @@ class AnnotationApp:
         # --- Ctrl / Cmd shortcuts ----------------------------------------
         if ctrl or cmd:
             k = keysym.lower()
-            if k == 's':
+            if k == 's' and not self._viewing_annotator:
                 self._save_current()
-            elif k == 'z':
+            elif k == 'z' and not self._viewing_annotator:
                 self._undo()
             elif k == 'q':
                 self._quit()
@@ -351,15 +434,26 @@ class AnnotationApp:
 
         # --- Escape ----------------------------------------------------------
         if keysym == 'Escape':
-            self._clear_selection()
+            if self._viewing_annotator:
+                self._return_to_adjudication()
+            else:
+                self._clear_selection()
+            return 'break'
+
+        # --- Read-only when viewing an annotator ----------------------------
+        if self._viewing_annotator:
+            if keysym in ('Up', 'Down', 'Prior', 'Next', 'Home', 'End'):
+                return
             return 'break'
 
         # --- Navigation keys -----------------------------------------------
         if keysym == 'bracketright' or char == ']':
-            self._go_next()
+            if not self._viewing_annotator:
+                self._go_next()
             return 'break'
         if keysym == 'bracketleft' or char == '[':
-            self._go_prev()
+            if not self._viewing_annotator:
+                self._go_prev()
             return 'break'
 
         # --- Remove annotations ('u') ----------------------------------------
@@ -385,7 +479,9 @@ class AnnotationApp:
 
     def _annotation_path(self, filepath: str) -> str:
         basename = os.path.basename(filepath)
-        if self.annotator:
+        if self._adjudication_mode:
+            ann_filename = f"{basename}.adjudications.annotations"
+        elif self.annotator:
             ann_filename = f"{basename}.{self.annotator}.annotations"
         else:
             ann_filename = f"{basename}.annotations"
@@ -429,6 +525,38 @@ class AnnotationApp:
         self.current_span = None
         self._update_cursor_tags([])
 
+        # Adjudication: load annotator data and compute agreements
+        if self._adjudication_mode:
+            # Reset view state when navigating files
+            self._viewing_annotator = None
+            self._saved_annotation_set = None
+            if hasattr(self, '_view_var'):
+                self._view_var.set('Adjudication')
+            if hasattr(self, '_view_banner'):
+                self._view_banner.pack_forget()
+
+            basename = os.path.basename(filepath)
+            annotator_sets = []
+            self._annotator_sets_cache.clear()
+            for name, file_map in self._adjudication_annotators:
+                ann_file = file_map.get(basename)
+                if ann_file:
+                    aset = AnnotationSet.load(ann_file)
+                else:
+                    aset = AnnotationSet()
+                annotator_sets.append((name, aset))
+                self._annotator_sets_cache[name] = aset
+
+            agreed, disagreements, details = compute_adjudication(
+                annotator_sets, self.token_map,
+            )
+            self._disagreement_positions = disagreements
+            self._token_annotator_info = details
+
+            # If no existing adjudication file, start from agreed annotations
+            if not os.path.isfile(ann_path):
+                self.annotation_set = agreed
+
         # Populate text widget
         self.text_widget.config(state='normal')
         self.text_widget.delete('1.0', 'end')
@@ -446,7 +574,12 @@ class AnnotationApp:
     def _update_header(self) -> None:
         filepath = self.files[self.current_idx]
         basename = os.path.basename(filepath)
-        title = f"{self.annotator}  —  {basename}" if self.annotator else basename
+        if self._adjudication_mode:
+            title = f"Adjudication  —  {basename}"
+        elif self.annotator:
+            title = f"{self.annotator}  —  {basename}"
+        else:
+            title = basename
         self.lbl_filename.config(text=title)
         self.lbl_progress.config(
             text=f"({self.current_idx + 1} / {len(self.files)})"
@@ -457,6 +590,70 @@ class AnnotationApp:
         self.btn_next.config(
             state='normal' if self.current_idx < len(self.files) - 1 else 'disabled'
         )
+
+    # ------------------------------------------------------------------
+    # Annotator view switching (adjudication mode)
+    # ------------------------------------------------------------------
+
+    def _on_view_changed(self, selection: str) -> None:
+        """Handle the view dropdown change."""
+        if selection == 'Adjudication':
+            self._return_to_adjudication()
+        else:
+            self._view_annotator(selection)
+
+    def _view_annotator(self, name: str) -> None:
+        """Switch to read-only view of a single annotator's annotations."""
+        if self.token_map is None:
+            return
+        # Save current adjudication work if not already saved
+        if self._viewing_annotator is None:
+            self._saved_annotation_set = self.annotation_set.copy()
+
+        self._viewing_annotator = name
+        ann_set = self._annotator_sets_cache.get(name, AnnotationSet())
+        self.annotation_set = ann_set
+
+        # Redraw with annotator's annotations (no disagreement highlights)
+        self._redraw_annotations()
+        self._clear_selection()
+
+        # Show banner
+        self._view_banner_var.set(
+            f"Looking at {name} Annotations. Click here to return back."
+        )
+        self._view_banner.pack(fill='x', side='bottom', before=self._text_outer)
+
+        # Update header
+        filepath = self.files[self.current_idx]
+        basename = os.path.basename(filepath)
+        self.lbl_filename.config(text=f"{name}  \u2014  {basename}")
+        self.status_var.set(f"Viewing {name}'s annotations (read-only)")
+
+    def _return_to_adjudication(self) -> None:
+        """Return from annotator view back to adjudication editing."""
+        if self._viewing_annotator is None:
+            return
+        self._viewing_annotator = None
+
+        # Restore the adjudicator's working annotations
+        if self._saved_annotation_set is not None:
+            self.annotation_set = self._saved_annotation_set
+            self._saved_annotation_set = None
+
+        # Hide banner
+        self._view_banner.pack_forget()
+
+        # Reset dropdown
+        self._view_var.set('Adjudication')
+
+        # Redraw with disagreement highlights
+        self._redraw_annotations()
+        self._clear_selection()
+
+        # Restore header
+        self._update_header()
+        self.status_var.set("Returned to adjudication")
 
     # ------------------------------------------------------------------
     # Annotation rendering
@@ -484,6 +681,7 @@ class AnnotationApp:
         for lc in self.config.labels.values():
             self.text_widget.tag_remove(lc.tag, '1.0', 'end')
         self.text_widget.tag_remove(self.MULTI_LABEL_TAG, '1.0', 'end')
+        self.text_widget.tag_remove(self.DISAGREEMENT_TAG, '1.0', 'end')
         for combo_tag in self._combo_tags.values():
             self.text_widget.tag_remove(combo_tag, '1.0', 'end')
 
@@ -548,6 +746,10 @@ class AnnotationApp:
         # Insert pipe delimiters at boundaries of styled (bold/italic/underline) spans
         self._insert_style_pipes()
         self._propagate_tags_to_pipes()
+
+        # Disagreement highlights (adjudication mode, not when viewing an annotator)
+        if self._adjudication_mode and not self._viewing_annotator:
+            self._apply_disagreement_highlights()
 
         # Keep selection on top
         self.text_widget.tag_raise('sel')
@@ -767,6 +969,51 @@ class AnnotationApp:
                         self.text_widget.tag_add(tag, r_start, ext_end)
 
     # ------------------------------------------------------------------
+    # Disagreement highlights (adjudication mode)
+    # ------------------------------------------------------------------
+
+    def _apply_disagreement_highlights(self) -> None:
+        """Apply red background to all disagreement token positions."""
+        if not self._disagreement_positions or self.token_map is None:
+            return
+        self.text_widget.tag_remove(self.DISAGREEMENT_TAG, '1.0', 'end')
+
+        # Group by line and merge consecutive tokens into runs
+        by_line: dict = {}
+        for (sl, tok) in self._disagreement_positions:
+            by_line.setdefault(sl, []).append(tok)
+
+        for sl, toks in by_line.items():
+            toks.sort()
+            runs = []
+            run_start = toks[0]
+            run_end = toks[0]
+            for tok in toks[1:]:
+                if tok == run_end + 1:
+                    run_end = tok
+                else:
+                    runs.append((run_start, run_end))
+                    run_start = tok
+                    run_end = tok
+            runs.append((run_start, run_end))
+
+            for start_tok, end_tok in runs:
+                start_cr = self.token_map.token_char_range(sl, start_tok)
+                end_cr = self.token_map.token_char_range(sl, end_tok)
+                if start_cr and end_cr:
+                    tk_line = sl + 1
+                    adj_start = self._add_pipe_offset(tk_line, start_cr[0])
+                    adj_end = self._add_pipe_offset(tk_line, end_cr[1] + 1)
+                    self.text_widget.tag_add(
+                        self.DISAGREEMENT_TAG,
+                        f"{tk_line}.{adj_start}",
+                        f"{tk_line}.{adj_end}",
+                    )
+
+        # Disagreement sits below annotation tags but above default text
+        self.text_widget.tag_lower(self.DISAGREEMENT_TAG)
+
+    # ------------------------------------------------------------------
     # Mouse selection → token-snapping
     # ------------------------------------------------------------------
 
@@ -784,13 +1031,18 @@ class AnnotationApp:
         """Update the cursor-position tag box as the mouse moves over the text."""
         if self.token_map is None:
             return
-        if self.current_span is not None:
-            return  # Selection is active; box is managed by _restore_selection
         tk_index = self.text_widget.index(f"@{event.x},{event.y}")
         tk_line_i, tk_char_i = [int(x) for x in tk_index.split('.')]
         slate_line = tk_line_i - 1
         adj_char = self._strip_pipe_offset(tk_line_i, tk_char_i)
         token = self.token_map.char_to_token(slate_line, adj_char)
+
+        # Update annotator info panel (regardless of selection state)
+        if self._adjudication_mode:
+            self._update_annotator_info(slate_line, token)
+
+        if self.current_span is not None:
+            return  # Selection is active; box is managed by _restore_selection
         if token is None:
             self._update_cursor_tags([])
             return
@@ -801,6 +1053,44 @@ class AnnotationApp:
                     lc = self.config.internal_to_config.get(internal)
                     names.append(lc.name if lc else internal.removeprefix('label:'))
         self._update_cursor_tags(names)
+
+    def _on_mouse_leave(self, _event: tk.Event) -> None:
+        """Clear hover-dependent displays when the mouse leaves the text."""
+        self._update_cursor_tags([])
+        if self._adjudication_mode:
+            self._update_annotator_info(None, None)
+
+    def _update_annotator_info(
+        self, slate_line: Optional[int], token: Optional[int],
+    ) -> None:
+        """Show/hide the annotator info overlay in the bottom-right of the text area."""
+        if not hasattr(self, '_ann_info_label'):
+            return
+        if slate_line is None or token is None:
+            self._ann_info_frame.place_forget()
+            self._ann_info_visible = False
+            return
+        info = self._token_annotator_info.get((slate_line, token), {})
+        if not info:
+            self._ann_info_frame.place_forget()
+            self._ann_info_visible = False
+            return
+        lines = []
+        for name in self._annotator_names:
+            labels = info.get(name, set())
+            if labels:
+                label_names = []
+                for internal in sorted(labels):
+                    lc = self.config.internal_to_config.get(internal)
+                    label_names.append(
+                        lc.name if lc else internal.removeprefix('label:')
+                    )
+                lines.append(f"{name}:  {', '.join(label_names)}")
+            else:
+                lines.append(f"{name}:  \u2014")
+        self._ann_info_label.config(text='\n'.join(lines))
+        self._ann_info_visible = True
+        self._reposition_ann_info()
 
     def _update_cursor_tags(self, names: list) -> None:
         """Update the cursor-position tag box without resizing the status bar."""
@@ -1131,6 +1421,10 @@ class AnnotationApp:
             return
         self.font_size = new_size
         self.text_widget.config(font=('Helvetica', self.font_size))
+        # Update annotator info overlay font to match
+        if hasattr(self, '_ann_info_label'):
+            self._ann_info_label.config(font=('Helvetica', self.font_size))
+            self._reposition_ann_info()
         # Reconfigure style-based tags with the new size
         self._configure_tags()
         # Invalidate combo-tag cache so they are rebuilt at the new size
@@ -1160,7 +1454,11 @@ def run_app(
     files: List[str],
     output_dir: Optional[str],
     annotator: str,
+    adjudication_annotators: Optional[List[tuple]] = None,
 ) -> None:
     root = tk.Tk()
-    _app = AnnotationApp(root, config, files, output_dir, annotator)
+    _app = AnnotationApp(
+        root, config, files, output_dir, annotator,
+        adjudication_annotators=adjudication_annotators,
+    )
     root.mainloop()
