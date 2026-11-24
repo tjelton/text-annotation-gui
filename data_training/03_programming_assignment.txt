@@ -1,0 +1,13 @@
+Assignment 2 feedback: Word frequency counter
+
+The goal of this assignment was to write a program that reads a text file, counts how often each word appears, and prints the ten most common words. Marks were given for correctness, code style, and testing.
+
+Your program runs and gives the right output for the sample file, nice work. Your function names are descriptive and the code is easy to follow.
+
+There are two correctness problems. First, your program treats "The" and "the" as different words, so the counts for common words are split. Second, on line 23 the loop stops one item early, so only nine words are printed.
+
+You did not submit any tests. Writing a few small test cases first, such as an empty file or a file with one word repeated, is a good way to catch problems like the off-by-one error before you submit. When a result looks wrong, try printing the values inside the loop to see where they start to differ from what you expect.
+
+Going forward, keep a short checklist of the mistakes you tend to make (case sensitivity was also an issue in Assignment 1) and run through it before each submission.
+
+You're clearly a capable programmer!

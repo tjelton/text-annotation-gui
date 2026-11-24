@@ -1,0 +1,13 @@
+Lab report feedback: Acid-base titration
+
+The purpose of this report was to determine the concentration of an unknown hydrochloric acid solution and to discuss the sources of error in your method. Reports are marked on the accuracy of the results, the clarity of the method, and the quality of the error analysis.
+
+Results: Your titres are concordant to within 0.10 mL, which shows careful technique at the bench. However, the final concentration in Table 2 is out by a factor of ten because the volume was not converted from mL to L before you calculated the moles of NaOH. Your graph is also missing units on both axes.
+
+Method: The method is clear and could be repeated by another student.
+
+Error analysis: This section lists possible errors, such as parallax and impure reagents, but does not say how each one would change your result. For example, if you overshot the end point, would your calculated concentration be too high or too low?
+
+Next steps: When you write up calculations, include the units at every step; this makes conversion errors much easier to spot. For the next report, go back over your own error analysis and, for each error, ask yourself which direction it would push the result. You did this well in the pre-lab quiz, so you already have the skills.
+
+Mark: 14/20

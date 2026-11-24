@@ -16,6 +16,7 @@ A lightweight, keyboard-driven GUI for span-level text annotation. Select text w
 - [Output File Format](#output-file-format)
 - [Multi-Annotator Workflows](#multi-annotator-workflows)
 - [Adjudication Mode](#adjudication-mode)
+- [Annotator Training](#annotator-training)
 - [Tips and Common Questions](#tips-and-common-questions)
 - [Acknowledgements](#acknowledgements)
 
@@ -451,6 +452,55 @@ For example, `01.txt.adjudications.annotations`. The file format is identical to
 ### Resuming
 
 If you close the tool and reopen it with the same command, existing `.adjudications.annotations` files are loaded automatically so you can continue where you left off.
+
+---
+
+## Annotator Training
+
+The `data_training/` folder holds five short pieces of written feedback for new annotators to practise on before they start on the real data. They were written for training and are not real feedback to real students. Between them they use every label in `config_example_layers.txt`.
+
+| File | Feedback on | What it practises |
+|---|---|---|
+| `01_history_essay.txt` | A history essay | A balanced mix of goals, comments on the work, and next steps |
+| `02_lab_report.txt` | A chemistry lab report | Mostly comments on the task; several point to a particular table or section |
+| `03_programming_assignment.txt` | A programming assignment | Advice on strategies such as testing and debugging |
+| `04_reflective_journal.txt` | A nursing reflective journal | Self-regulation, and praise of the student as a person |
+| `05_group_presentation.txt` | A group presentation | Short and general, with little that is specific |
+
+### Running the training
+
+Each trainee uses their own name and a separate output folder, so training annotations never mix with the real ones:
+
+```bash
+python3 -m annotation_tool -f ./data_training -c config_example_layers.txt -o ./annotations_training -a <your-name>
+```
+
+The config has three groups of labels. The `dimension` colours are always on screen; the `level` and `specificity` groups are [layers](#layers) that take turns, and **Tab** switches between them.
+
+| Group | What it codes | Labels (key) | Shown as |
+|---|---|---|---|
+| `dimension` | Feedback level | SELF (`q`), TASK (`w`), PROC (`e`), SREG (`r`) | Highlight colours, always shown |
+| `level` | Feedback question | F-UP (`1`), F-BA (`2`), F-FF (`3`) | Italic, bold, underline, on the `level` layer |
+| `specificity` | Specificity of each idea | SP-INST (`a`), SP-WHAT (`s`), SP-BOTH (`d`) | Italic, bold, underline, on the `specificity` layer |
+
+The tool opens on the `level` layer. One way to work through each file:
+
+1. Read the whole file before labelling anything.
+2. On the `level` layer, select a piece of feedback and press its `dimension` key and its `level` key.
+3. Press **Tab** to show the `specificity` layer and add specificity labels. The `dimension` colours stay on screen, so you can see the spans you have already marked.
+4. Press **`]`** to save and move to the next file.
+
+The **Help** button in the header lists every key.
+
+### Comparing trainees
+
+When every trainee has finished, open the training annotations in [adjudication mode](#adjudication-mode) to see where they disagree:
+
+```bash
+python3 -m annotation_tool adjudicate -f ./data_training -c config_example_layers.txt -p ./annotations_training -o ./annotations_training
+```
+
+Disagreements are highlighted in red. Each group is compared on its own, so press **Tab** to see the disagreements on each layer, and hover over a word to see what each trainee chose. Talking through these as a group before moving on to the real data is the quickest way to agree on how to apply the labels.
 
 ---
 
