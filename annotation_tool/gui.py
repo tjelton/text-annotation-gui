@@ -83,7 +83,10 @@ class AnnotationApp:
 
         # The snapped selection: (start_line, start_tok, end_line, end_tok) — all 0-indexed
         self.current_span: Optional[Tuple[int, int, int, int]] = None
+        # Widget indices where the mouse was pressed and released, used to
+        # tell left-to-right drags from right-to-left ones.
         self._drag_anchor: Optional[str] = None
+        self._drag_release: Optional[str] = None
 
         # Font size for the text area (adjustable at runtime)
         self.font_size: int = 13
@@ -103,14 +106,14 @@ class AnnotationApp:
         self._viewing_annotator: Optional[str] = None
         self._saved_annotation_set: Optional[AnnotationSet] = None
         self._annotator_sets_cache: dict = {}  # name → AnnotationSet for current file
+        # Annotators with no annotations on the current file (left out of the comparison)
+        self._empty_annotators: List[str] = []
 
         self._build_ui()
         self._astral_width = self._measure_astral_width()
         self._configure_tags()
         self._bind_keys()
-        for idx in range(len(self.files)):
-            if self._load_file(idx):
-                break
+        self._load_first_available(range(len(self.files)))
 
     def _measure_astral_width(self) -> int:
         """How many Tk index positions one emoji (non-BMP character) occupies.
@@ -308,6 +311,15 @@ class AnnotationApp:
             lbl.pack(fill='x')
             lbl.bind('<Button-1>', lambda e: self._return_to_adjudication())
 
+            # Notice naming annotators who made no annotations on this file
+            self._notice_bar = tk.Frame(self.root, bg='#fcf3cf', padx=8, pady=4)
+            self._notice_var = tk.StringVar(value='')
+            tk.Label(
+                self._notice_bar, textvariable=self._notice_var,
+                bg='#fcf3cf', fg='#7d6608', anchor='w', justify='left',
+                font=('Helvetica', 11), padx=10, pady=2,
+            ).pack(fill='x')
+
         # ── Text area ─────────────────────────────────────────────────
         self._text_outer = tk.Frame(self.root, bg='white')
         self._text_outer.pack(fill='both', expand=True, padx=0, pady=0)
@@ -423,11 +435,19 @@ class AnnotationApp:
         self.text_widget.bind('<Leave>', self._on_mouse_leave)
 
         # The widget stays in 'normal' state so it receives key events, so
-        # also block the non-keyboard ways Tk can edit it — notably a
-        # middle-click, which pastes the selection into the document.
-        for seq in ('<<Paste>>', '<<PasteSelection>>', '<<Cut>>',
-                    '<<Clear>>', '<<Undo>>', '<<Redo>>'):
+        # also block the other ways Tk can edit it: a middle-click pastes the
+        # selection, and on macOS the press-and-hold accent menu / input
+        # methods send events that delete text (Tk 8.6+).
+        #
+        # Don't add <<Undo>>/<<Redo>> here: a virtual event tied to a specific
+        # key outranks the catch-all <Key> binding, so binding it would
+        # swallow Ctrl/Cmd+Z before _on_key_press could undo.  The same rule
+        # is why <<Copy>> is bound to our own copy handler.
+        for seq in ('<<Paste>>', '<<PasteSelection>>', '<<Cut>>', '<<Clear>>',
+                    '<<TkAccentBackspace>>', '<<TkStartIMEMarkedText>>',
+                    '<<TkEndIMEMarkedText>>', '<<TkClearIMEMarkedText>>'):
             self.text_widget.bind(seq, lambda _e: 'break')
+        self.text_widget.bind('<<Copy>>', self._copy_selection)
 
         # Window close
         self.root.protocol('WM_DELETE_WINDOW', self._quit)
@@ -449,6 +469,18 @@ class AnnotationApp:
         # or every keypress would be treated as Cmd-held when Num Lock is on.
         cmd    = sys.platform == 'darwin' and bool(event.state & 0x8)
 
+        # Windows reports AltGr as Ctrl+Alt (Alt = 0x20000), so a printable
+        # character typed with AltGr (e.g. '[' or ']' on German keyboards)
+        # is an ordinary key, not a Ctrl shortcut.
+        if (ctrl and sys.platform == 'win32' and event.state & 0x20000
+                and char and char.isprintable()):
+            ctrl = False
+
+        # With Caps Lock on, letter keys arrive in upper case; fall back to
+        # the lower-case key unless the upper-case one is itself a label.
+        if event.state & 0x2 and char and char not in self.config.labels:
+            char = char.lower()
+
         # --- Ctrl / Cmd shortcuts ----------------------------------------
         if ctrl or cmd:
             k = keysym.lower()
@@ -463,13 +495,14 @@ class AnnotationApp:
             elif k == 'minus':
                 self._change_font_size(-1)
             elif k == 'c':
-                return  # Allow copy
+                self._copy_selection()
             elif k == 'a':
-                # Let Tk handle select-all, then re-snap so the stored span
-                # matches whatever is now selected (or clear it if nothing is).
-                self._drag_anchor = None
-                self.root.after(15, self._snap_selection)
-                return
+                # Select all ourselves: Tk's own Ctrl+A moves to the line
+                # start on Linux and older Tk.  Then snap so the stored span
+                # matches what is now selected.
+                self.text_widget.tag_add('sel', '1.0', 'end-1c')
+                self._drag_anchor = self._drag_release = None
+                self._snap_selection()
             return 'break'
 
         # --- Escape ----------------------------------------------------------
@@ -514,6 +547,34 @@ class AnnotationApp:
         # --- Block everything else -------------------------------------------
         return 'break'
 
+    def _selected_original_text(self) -> Optional[str]:
+        """The selected text without the inserted [ ] bracket characters."""
+        w = self.text_widget
+        try:
+            first, last = w.index('sel.first'), w.index('sel.last')
+        except tk.TclError:
+            return None
+        parts, pos = [], first
+        ranges = w.tag_ranges(self.PIPE_TAG)
+        for i in range(0, len(ranges), 2):
+            p_start, p_end = str(ranges[i]), str(ranges[i + 1])
+            if w.compare(p_end, '<=', first) or w.compare(p_start, '>=', last):
+                continue
+            if w.compare(p_start, '>', pos):
+                parts.append(w.get(pos, p_start))
+            pos = p_end if w.compare(p_end, '<', last) else last
+        if w.compare(pos, '<', last):
+            parts.append(w.get(pos, last))
+        return ''.join(parts)
+
+    def _copy_selection(self, _event=None) -> str:
+        """Copy the selection to the clipboard, minus the bracket characters."""
+        text = self._selected_original_text()
+        if text:
+            self.root.clipboard_clear()
+            self.root.clipboard_append(text)
+        return 'break'
+
     _SCROLL_KEYS = {
         'Up': (-1, 'units'), 'Down': (1, 'units'),
         'Prior': (-1, 'pages'), 'Next': (1, 'pages'),
@@ -549,11 +610,41 @@ class AnnotationApp:
             return os.path.join(self.output_dir, ann_filename)
         return os.path.join(os.path.dirname(filepath), ann_filename)
 
-    def _load_file(self, idx: int) -> bool:
-        """Load file *idx*; return False (leaving the current file as it
-        was) if it or its annotations cannot be read."""
+    def _load_first_available(self, indices) -> bool:
+        """Load the first file in *indices* that can be opened.
+
+        Files that can't be opened (e.g. an annotation file that isn't
+        UTF-8, or a cloud file that fails to download) are skipped and
+        reported together, so one bad file doesn't block the rest.
+        Returns False, leaving the current file as it was, if none open.
+        """
+        skipped = []
+        for idx in indices:
+            err = self._load_file(idx)
+            if err is None:
+                if skipped:
+                    self.status_var.set(f"Skipped {len(skipped)} file(s) that could not be opened")
+                    messagebox.showwarning(
+                        "Skipped files",
+                        "These files could not be opened and were skipped:\n\n"
+                        + "\n".join(skipped),
+                    )
+                return True
+            skipped.append(f"{os.path.basename(self.files[idx])}: {err}")
+        if skipped:
+            self.status_var.set("Could not open " + skipped[0])
+            messagebox.showerror(
+                "Could not open file",
+                "These files could not be opened:\n\n" + "\n".join(skipped),
+            )
+        return False
+
+    def _load_file(self, idx: int) -> Optional[str]:
+        """Load file *idx*.  Return None on success, or an error message
+        (leaving the current file as it was) if it or its annotations
+        cannot be read."""
         if idx < 0 or idx >= len(self.files):
-            return False
+            return "no such file"
 
         filepath = self.files[idx]
         basename = os.path.basename(filepath)
@@ -573,11 +664,7 @@ class AnnotationApp:
                     aset = AnnotationSet.load(ann_file) if ann_file else AnnotationSet()
                     annotator_sets.append((name, aset))
         except (OSError, ValueError) as exc:   # UnicodeDecodeError is a ValueError
-            self.status_var.set(f"Could not open {basename}: {exc}")
-            messagebox.showerror(
-                "Could not open file", f"{basename} could not be opened:\n{exc}",
-            )
-            return False
+            return str(exc)
 
         self.current_idx = idx
         self.token_map = token_map
@@ -609,11 +696,13 @@ class AnnotationApp:
 
             self._annotator_sets_cache = dict(annotator_sets)
 
-            agreed, disagreements, details = compute_adjudication(
+            agreed, disagreements, details, empty = compute_adjudication(
                 annotator_sets, self.token_map,
             )
             self._disagreement_positions = disagreements
             self._token_annotator_info = details
+            self._empty_annotators = empty
+            self._update_notice_bar()
 
             # If no existing adjudication file, start from agreed annotations
             if not os.path.isfile(ann_path):
@@ -632,7 +721,23 @@ class AnnotationApp:
         self._update_header()
         self.status_var.set(f"Loaded: {basename}")
         self.text_widget.focus_set()
-        return True
+        return None
+
+    def _update_notice_bar(self) -> None:
+        """Show which annotators made no annotations on the current file."""
+        empty = self._empty_annotators
+        if not empty:
+            self._notice_bar.pack_forget()
+            return
+        if len(empty) == len(self._annotator_names):
+            text = "None of the annotators made any annotations on this document."
+        else:
+            names = (empty[0] if len(empty) == 1
+                     else ', '.join(empty[:-1]) + ' and ' + empty[-1])
+            text = (f"{names} made no annotations on this document, "
+                    f"so they are left out of the comparison.")
+        self._notice_var.set(text)
+        self._notice_bar.pack(fill='x', side='top', before=self._text_outer)
 
     def _update_header(self) -> None:
         filepath = self.files[self.current_idx]
@@ -685,7 +790,7 @@ class AnnotationApp:
         self._view_banner_var.set(
             f"Looking at {name} Annotations. Click here to return back."
         )
-        self._view_banner.pack(fill='x', side='bottom', before=self._text_outer)
+        self._view_banner.pack(fill='x', side='top', before=self._text_outer)
 
         # Update header
         filepath = self.files[self.current_idx]
@@ -1058,17 +1163,9 @@ class AnnotationApp:
             runs.append((run_start, run_end))
 
             for start_tok, end_tok in runs:
-                start_cr = self.token_map.token_char_range(sl, start_tok)
-                end_cr = self.token_map.token_char_range(sl, end_tok)
-                if start_cr and end_cr:
-                    tk_line = sl + 1
-                    adj_start = self._add_pipe_offset(tk_line, start_cr[0])
-                    adj_end = self._add_pipe_offset(tk_line, end_cr[1] + 1)
-                    self.text_widget.tag_add(
-                        self.DISAGREEMENT_TAG,
-                        f"{tk_line}.{adj_start}",
-                        f"{tk_line}.{adj_end}",
-                    )
+                rng = self._span_widget_range(sl, start_tok, sl, end_tok)
+                if rng:
+                    self.text_widget.tag_add(self.DISAGREEMENT_TAG, *rng)
 
         # Disagreement sits below annotation tags but above default text
         self.text_widget.tag_lower(self.DISAGREEMENT_TAG)
@@ -1081,11 +1178,29 @@ class AnnotationApp:
         """Clear stored span on a fresh click and record the drag anchor."""
         self.current_span = None
         self._drag_anchor = self.text_widget.index(f"@{event.x},{event.y}")
+        self._drag_release = None
         self.text_widget.config(selectbackground=self.SELECT_DEFAULT_BG)
 
-    def _on_mouse_release(self, _event: tk.Event) -> None:
-        """Schedule snap after the Text widget finishes updating the selection."""
+    def _on_mouse_release(self, event: tk.Event) -> None:
+        """Record where the drag ended, then snap once the Text widget has
+        finished updating the selection."""
+        self._drag_release = self.text_widget.index(f"@{event.x},{event.y}")
         self.root.after(15, self._snap_selection)
+
+    def _span_widget_range(
+        self, start_sl: int, start_tok: int, end_sl: int, end_tok: int,
+    ) -> Optional[Tuple[str, str]]:
+        """Widget indices covering tokens start..end, excluding the inserted
+        bracket characters just outside them."""
+        start_cr = self.token_map.token_char_range(start_sl, start_tok)
+        end_cr = self.token_map.token_char_range(end_sl, end_tok)
+        if not start_cr or not end_cr:
+            return None
+        start = self._add_pipe_offset(start_sl + 1, start_cr[0])
+        # Map the last character, then step past it: mapping the exclusive
+        # end directly would land after a '] ' inserted at that position.
+        end = self._add_pipe_offset(end_sl + 1, end_cr[1]) + 1
+        return f"{start_sl + 1}.{start}", f"{end_sl + 1}.{end}"
 
     def _on_mouse_motion(self, event: tk.Event) -> None:
         """Update the cursor-position tag box as the mouse moves over the text."""
@@ -1143,6 +1258,8 @@ class AnnotationApp:
             return
         lines = []
         for name in self._annotator_names:
+            if name in self._empty_annotators:
+                continue   # left out of this document's comparison
             labels = info.get(name, set())
             if labels:
                 label_names = [self._label_display_name(i) for i in sorted(labels)]
@@ -1201,13 +1318,13 @@ class AnnotationApp:
         end_tk_char   = self._strip_pipe_offset(end_tk_line,   end_tk_char)
         last_char     = end_tk_char - 1   # sel.last is exclusive
 
-        # --- Determine drag direction from stored anchor -------------------
-        # Anchor is at sel.first for L→R drags, sel.last for R→L drags.
-        anchor = getattr(self, '_drag_anchor', None)
+        # --- Determine drag direction: press point vs release point -------
+        # (Comparing the press point with sel.last can't work: the press
+        # point is never after sel.last, whichever way the mouse moved.)
         ltr = True  # default: left-to-right
-        if anchor:
+        if self._drag_anchor and self._drag_release:
             try:
-                ltr = self.text_widget.compare(anchor, '<=', raw_end)
+                ltr = self.text_widget.compare(self._drag_anchor, '<=', self._drag_release)
             except tk.TclError:
                 pass
 
@@ -1251,15 +1368,10 @@ class AnnotationApp:
         self.current_span = (start_sl, start_tok, end_sl, end_tok)
 
         # --- Update visual selection to full token boundaries -------------
-        start_cr = self.token_map.token_char_range(start_sl, start_tok)
-        end_cr   = self.token_map.token_char_range(end_sl,   end_tok)
-        if start_cr and end_cr:
-            adj_start = self._add_pipe_offset(start_sl + 1, start_cr[0])
-            adj_end   = self._add_pipe_offset(end_sl   + 1, end_cr[1] + 1)
-            tk_sel_start = f"{start_sl + 1}.{adj_start}"
-            tk_sel_end   = f"{end_sl   + 1}.{adj_end}"
+        rng = self._span_widget_range(start_sl, start_tok, end_sl, end_tok)
+        if rng:
             self.text_widget.tag_remove('sel', '1.0', 'end')
-            self.text_widget.tag_add('sel', tk_sel_start, tk_sel_end)
+            self.text_widget.tag_add('sel', *rng)
 
         # Update status bar
         if start_sl == end_sl:
@@ -1358,16 +1470,10 @@ class AnnotationApp:
         """Re-apply the visual 'sel' highlight from current_span after a redraw."""
         if self.current_span is None:
             return
-        start_sl, start_tok, end_sl, end_tok = self.current_span
-        start_cr = self.token_map.token_char_range(start_sl, start_tok)
-        end_cr   = self.token_map.token_char_range(end_sl,   end_tok)
-        if start_cr and end_cr:
-            adj_start = self._add_pipe_offset(start_sl + 1, start_cr[0])
-            adj_end   = self._add_pipe_offset(end_sl   + 1, end_cr[1] + 1)
-            tk_sel_start = f"{start_sl + 1}.{adj_start}"
-            tk_sel_end   = f"{end_sl   + 1}.{adj_end}"
+        rng = self._span_widget_range(*self.current_span)
+        if rng:
             self.text_widget.tag_remove('sel', '1.0', 'end')
-            self.text_widget.tag_add('sel', tk_sel_start, tk_sel_end)
+            self.text_widget.tag_add('sel', *rng)
             self.text_widget.tag_raise('sel')
         self._update_cursor_tags(self._labels_in_selection())
 
@@ -1439,14 +1545,14 @@ class AnnotationApp:
             self.status_var.set("Already at the last file")
             return
         if self._save_before_leaving("Go to the next file"):
-            self._load_file(self.current_idx + 1)
+            self._load_first_available(range(self.current_idx + 1, len(self.files)))
 
     def _go_prev(self) -> None:
         if self.current_idx <= 0:
             self.status_var.set("Already at the first file")
             return
         if self._save_before_leaving("Go to the previous file"):
-            self._load_file(self.current_idx - 1)
+            self._load_first_available(range(self.current_idx - 1, -1, -1))
 
     def _show_help(self) -> None:
         """Open a modal help window with keyboard shortcut reference."""

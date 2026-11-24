@@ -326,6 +326,10 @@ class AnnotationSet:
 
     def __init__(self) -> None:
         self.annotations: List[Annotation] = []
+        # Lines from the file that this tool can't represent (e.g. slate's
+        # character-level spans, links, or items with no labels).  They are
+        # written back unchanged on save so they are never lost.
+        self.preserved_lines: List[str] = []
 
     # ------------------------------------------------------------------
     # Queries
@@ -454,33 +458,56 @@ class AnnotationSet:
         )
 
     def save(self, filepath: str) -> None:
-        """Write annotations to *filepath* in slate-compatible format."""
+        """Write annotations to *filepath* in slate-compatible format.
+
+        The file is written to a temporary file first and then swapped into
+        place, so a failed write (disk full, sync error) leaves the previous
+        version intact instead of an empty or truncated file.
+        """
         parent = os.path.dirname(filepath)
         if parent:
             os.makedirs(parent, exist_ok=True)
-        with open(filepath, 'w', encoding='utf-8') as f:
-            for ann in self.get_all():
-                line_str = ann.to_slate_str()
-                if line_str:
-                    f.write(line_str + '\n')
+        lines = [a.to_slate_str() for a in self.get_all()]
+        lines = [s for s in lines if s] + self.preserved_lines
+        tmp_path = filepath + '.tmp'
+        try:
+            with open(tmp_path, 'w', encoding='utf-8') as f:
+                for line in lines:
+                    f.write(line + '\n')
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(tmp_path, filepath)
+        except BaseException:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
 
     @classmethod
     def load(cls, filepath: str) -> 'AnnotationSet':
-        """Read a slate-format annotation file, return an AnnotationSet."""
+        """Read a slate-format annotation file, return an AnnotationSet.
+
+        Lines are split at the first '-' into span and labels, as slate does
+        (span positions never contain '-', so hyphenated labels such as
+        ``label:F-UP`` are safe).  Lines this tool can't represent are kept
+        in ``preserved_lines``.  A UTF-8 byte-order mark is ignored.
+        """
         ann_set = cls()
         if not os.path.isfile(filepath):
             return ann_set
-        with open(filepath, 'r', encoding='utf-8') as f:
+        with open(filepath, 'r', encoding='utf-8-sig') as f:
             for raw in f:
-                raw = raw.strip()
-                if not raw or ' - ' not in raw:
+                line = raw.rstrip('\r\n')
+                if not line.strip():
                     continue
-                span_str, labels_str = raw.split(' - ', 1)
-                labels = set(labels_str.split()) if labels_str.strip() else set()
-                if not labels:
-                    continue
-                parsed = _parse_span(span_str.strip())
-                if parsed is None:
+                parsed, labels = None, set()
+                if '-' in line:
+                    span_str, labels_str = line.split('-', 1)
+                    labels = set(labels_str.split())
+                    parsed = _parse_span(span_str.strip())
+                if parsed is None or not labels:
+                    ann_set.preserved_lines.append(line)
                     continue
                 start_line, start_tok, end_line, end_tok = parsed
                 ann_set.annotations.append(
@@ -496,6 +523,7 @@ class AnnotationSet:
     def copy(self) -> 'AnnotationSet':
         new_set = AnnotationSet()
         new_set.annotations = [a.copy() for a in self.annotations]
+        new_set.preserved_lines = list(self.preserved_lines)
         return new_set
 
 
@@ -554,24 +582,39 @@ def find_annotators(
 def compute_adjudication(
     annotator_sets: List[Tuple[str, 'AnnotationSet']],
     token_map: 'TokenMap',
-) -> Tuple['AnnotationSet', set, dict]:
+) -> Tuple['AnnotationSet', set, dict, List[str]]:
     """Compare annotations from multiple annotators for a single document.
 
-    An annotation is *agreed* when every annotator has an identical span
-    (same line, start_token, end_line, end_token) with an identical label
-    set.  Everything else is a disagreement.
+    An annotator with no annotations on the document (no file, or an empty
+    one) most likely skipped it by mistake, so they are left out of the
+    comparison and reported in *empty_annotators* instead of turning every
+    other annotator's work into a disagreement.
+
+    An annotation is *agreed* when every remaining annotator has an
+    identical span (same line, start_token, end_line, end_token) with an
+    identical label set.  Everything else is a disagreement.
 
     Returns
     -------
     agreed_set : AnnotationSet
-        Annotations identical across all annotators.
+        Annotations identical across all compared annotators.
     disagreement_positions : set of (slate_line, token)
         Token positions covered by at least one non-agreed annotation.
     token_annotator_info : dict
         ``{(line, token): {annotator_name: set_of_internal_labels}}``
+    empty_annotators : list of str
+        Names of annotators left out because they made no annotations.
     """
+    empty_annotators = [
+        name for name, ann_set in annotator_sets
+        if not any(a.labels for a in ann_set.annotations)
+    ]
+    annotator_sets = [
+        (name, ann_set) for name, ann_set in annotator_sets
+        if name not in empty_annotators
+    ]
     if not annotator_sets:
-        return AnnotationSet(), set(), {}
+        return AnnotationSet(), set(), {}, empty_annotators
 
     def _ann_key(ann: Annotation) -> tuple:
         return (ann.line, ann.start_token, ann.end_line, ann.end_token,
@@ -628,7 +671,7 @@ def compute_adjudication(
                     token_annotator_info[pos][ann_name] = set()
                 token_annotator_info[pos][ann_name].update(ann.labels)
 
-    return agreed_set, disagreement_positions, token_annotator_info
+    return agreed_set, disagreement_positions, token_annotator_info, empty_annotators
 
 
 # ---------------------------------------------------------------------------

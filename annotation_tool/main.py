@@ -12,8 +12,22 @@ import os
 import sys
 
 from .config import Config
-from .data import find_annotators, get_txt_files, read_text
+from .data import ADJUDICATION_NAME, find_annotators, get_txt_files, read_text
 from .gui import run_app
+
+# Characters that can't appear in a filename on Windows (and '/' anywhere);
+# the annotator name becomes part of the output filename.
+_INVALID_NAME_CHARS = set('<>:"/\\|?*')
+
+
+def _annotator_name_error(name: str) -> str:
+    """Return why *name* can't be used as an annotator name, or ''."""
+    bad = sorted(set(name) & _INVALID_NAME_CHARS)
+    if bad:
+        return f"it contains {' '.join(bad)}, which can't be used in filenames"
+    if name.lower() == ADJUDICATION_NAME:
+        return "that name is reserved for adjudication output files"
+    return ''
 
 
 def _readable_files(paths: list) -> list:
@@ -138,6 +152,11 @@ Examples:
     # --- Mode-specific logic -----------------------------------------------
 
     if args.mode == 'annotate':
+        problem = _annotator_name_error(args.annotator)
+        if problem:
+            print(f"Error: can't use annotator name {args.annotator!r}: {problem}",
+                  file=sys.stderr)
+            sys.exit(1)
         print(f"Files   : {len(files)}")
         print(f"Labels  : {', '.join(f'[{lc.key}] {lc.name}' for lc in config.labels.values())}")
         if output_dir:
@@ -156,7 +175,8 @@ Examples:
 
         txt_basenames = [os.path.basename(f) for f in files]
         annotator_data = []
-        used_names: set = set()
+        # 'Adjudication' is the dropdown entry for the adjudicator's own view
+        used_names: set = {'Adjudication'}
         seen_dirs: set = set()
         unnamed_counter = 1
 

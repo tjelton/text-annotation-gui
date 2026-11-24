@@ -216,6 +216,7 @@ Label:  F-UP    1   italic
 
 ### Rules
 
+- A trailing `# comment` is allowed after the fields; any other extra text (e.g. `group=level` without quotes) is reported as an error.
 - Each key must be unique across all labels.
 - The keys `[`, `]`, and `u` are **reserved** for navigation and cannot be used as label keys.
 - Label names must be unique.
@@ -243,7 +244,7 @@ python3 -m annotation_tool -f <folder> -c <config> [options]
 | Argument | Description |
 |---|---|
 | `-o`, `--output DIR` | Directory where `.annotations` files are written. Defaults to the same folder as the input files. |
-| `-a`, `--annotator NAME` | Annotator identifier. Shown in the header bar and used in output filenames so multiple annotators can work on the same files independently (see [Multi-Annotator Workflows](#multi-annotator-workflows)). |
+| `-a`, `--annotator NAME` | Annotator identifier. Shown in the header bar and used in output filenames so multiple annotators can work on the same files independently (see [Multi-Annotator Workflows](#multi-annotator-workflows)). It can't contain `< > : " / \ \| ? *`, and `adjudications` is reserved. |
 
 
 ### Examples
@@ -299,6 +300,8 @@ Each line in the annotation file describes one annotated span. Using NER as an e
 - A multi-line selection is stored as a single span from its first token to its last, e.g. `((0, 95), (2, 4)) - label:PER`. slate reads and writes cross-line spans in this same form.
 
 **Label prefix:** All label names in the output are prefixed with `label:` (e.g. `label:PER`), matching slate's internal convention.
+
+**Lines the tool can't display are kept.** slate can also write other kinds of lines, such as character-level spans, links between spans, and items with no labels. This tool can't show those, but it keeps them unchanged when it saves the file. Saves are written to a temporary file first and then swapped into place, so a failed save never leaves a half-written or empty file.
 
 ---
 
@@ -366,6 +369,8 @@ The tool compares annotations across all annotators for each document:
 - **Disagreements** — any span where annotators differ (different boundaries, different labels, or an annotation present for some annotators but not others) — are highlighted with a **red background**.
 
 The adjudicator uses the same label controls as annotation mode to resolve disagreements: select a span and press a label key to apply the final label. Agreed annotations can also be changed if needed.
+
+**Annotators who made no annotations on a document** (no file for it, or an empty one) most likely skipped it by mistake. They are left out of that document's comparison, so their absence doesn't turn everyone else's work red, and a yellow notice above the text names them, e.g. *"Bob made no annotations on this document, so they are left out of the comparison."* If only one annotator remains, their annotations are pre-loaded as agreed.
 
 ### Annotator names
 

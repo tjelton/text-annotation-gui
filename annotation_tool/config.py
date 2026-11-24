@@ -10,7 +10,8 @@ The fourth field can be:
 
 An optional fifth field, group="<group>", makes labels in the same group
 mutually exclusive: applying one automatically removes any other label
-from the same group on the affected tokens.
+from the same group on the affected tokens.  A trailing # comment is
+allowed; any other extra text is an error.
 
 Example:
     Label:  F-UP    f   red
@@ -78,7 +79,9 @@ class Config:
     def from_file(cls, filepath: str) -> 'Config':
         config = cls()
         name_lines: Dict[str, int] = {}   # label name → line it was defined on
-        with open(filepath, 'r', encoding='utf-8') as f:
+        # utf-8-sig: ignore the byte-order mark some Windows editors add, which
+        # would otherwise hide the first line from the 'Label:' check below.
+        with open(filepath, 'r', encoding='utf-8-sig') as f:
             for lineno, raw in enumerate(f, 1):
                 line = raw.strip()
                 if not line or line.startswith('#'):
@@ -124,11 +127,20 @@ class Config:
                     hex_colour = _resolve_colour(colour, lineno)
                     style = None
 
-                # Check for optional group="..." field
+                # Optional group="..." field, then optionally a # comment.
+                # Anything else is an error: a typo such as group=level
+                # (no quotes) must not silently disable mutual exclusion.
+                rest = line.split(None, 4)[4] if len(parts) > 4 else ''
                 group = None
-                group_match = re.search(r'group="([^"]+)"', line)
+                group_match = re.match(r'group="([^"]+)"\s*', rest)
                 if group_match:
                     group = group_match.group(1)
+                    rest = rest[group_match.end():]
+                if rest and not rest.startswith('#'):
+                    raise ValueError(
+                        f"Config line {lineno}: unrecognised text {rest!r} after "
+                        f"the colour; the only optional field is group=\"<name>\""
+                    )
 
                 internal = f"label:{name}"
                 # Tag name must be safe for tkinter (no : - special chars).
