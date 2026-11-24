@@ -26,13 +26,27 @@ def _natural_sort_key(s: str) -> list:
 
 
 def get_txt_files(folder: str) -> List[str]:
-    """Return naturally-sorted list of .txt paths in *folder*."""
+    """Return naturally-sorted list of .txt paths in *folder*.
+
+    Hidden files (e.g. macOS ``._01.txt`` metadata files) are skipped.
+    """
     entries = [
         os.path.join(folder, f)
         for f in os.listdir(folder)
-        if f.lower().endswith('.txt') and os.path.isfile(os.path.join(folder, f))
+        if f.lower().endswith('.txt') and not f.startswith('.')
+        and os.path.isfile(os.path.join(folder, f))
     ]
     return sorted(entries, key=lambda p: _natural_sort_key(os.path.basename(p)))
+
+
+def read_text(filepath: str) -> str:
+    """Read a document as UTF-8.
+
+    Raises OSError if the file cannot be read, or UnicodeDecodeError if it
+    is not valid UTF-8 (e.g. saved as Windows-1252).
+    """
+    with open(filepath, 'r', encoding='utf-8') as f:
+        return f.read()
 
 
 # ---------------------------------------------------------------------------
@@ -45,17 +59,30 @@ class TokenMap:
     convert between tkinter 'line.char' indices and slate (line, token) tuples.
 
     Tkinter lines are 1-indexed; slate lines are 0-indexed.
+
+    Character offsets are in the display widget's units.  Tk 8.x counts a
+    character outside the Basic Multilingual Plane (e.g. an emoji) as more
+    than one index position, so *astral_width* says how many positions one
+    such character occupies (1 for plain Python offsets / Tk 9).  Token
+    indices — the only thing written to annotation files — are unaffected.
     """
 
-    def __init__(self, raw_text: str) -> None:
+    def __init__(self, raw_text: str, astral_width: int = 1) -> None:
         self.raw_lines: List[str] = raw_text.split('\n')
 
         # tokens[i]           → list of token strings on slate line i
-        # token_ranges[i][j]  → (start_char, end_char_inclusive) of token j in raw_lines[i]
+        # token_ranges[i][j]  → (start_char, end_char_inclusive) of token j on line i
         self.tokens: List[List[str]] = []
         self.token_ranges: List[List[Tuple[int, int]]] = []
 
         for line in self.raw_lines:
+            # offsets[k] = widget offset of character k (plus one past the end)
+            offsets: Optional[List[int]] = None
+            if astral_width != 1 and any(ord(ch) > 0xFFFF for ch in line):
+                offsets = [0]
+                for ch in line:
+                    offsets.append(offsets[-1] + (astral_width if ord(ch) > 0xFFFF else 1))
+
             toks: List[str] = []
             rngs: List[Tuple[int, int]] = []
             i, n = 0, len(line)
@@ -68,7 +95,10 @@ class TokenMap:
                 while j < n and not line[j].isspace():
                     j += 1
                 toks.append(line[i:j])
-                rngs.append((i, j - 1))   # end is inclusive
+                if offsets is None:
+                    rngs.append((i, j - 1))   # end is inclusive
+                else:
+                    rngs.append((offsets[i], offsets[j] - 1))
                 i = j
             self.tokens.append(toks)
             self.token_ranges.append(rngs)
@@ -93,8 +123,10 @@ class TokenMap:
 
         *snap* controls behaviour when *char_offset* falls in whitespace:
           'nearest'  – pick whichever adjacent token boundary is closer (default)
-          'floor'    – always pick the previous token (do not overshoot right)
-          'ceiling'  – always pick the next token (do not overshoot left)
+          'floor'    – always pick the previous token (do not overshoot right);
+                       None if there is no token before *char_offset* on the line
+          'ceiling'  – always pick the next token (do not overshoot left);
+                       None if there is no token after *char_offset* on the line
         """
         if slate_line < 0 or slate_line >= len(self.token_ranges):
             return None
@@ -108,7 +140,8 @@ class TokenMap:
             if char_offset < start:
                 # We're in whitespace before token i
                 if i == 0:
-                    return 0                      # nothing to the left
+                    # Nothing to the left on this line
+                    return None if snap == 'floor' else 0
                 if snap == 'floor':
                     return i - 1
                 if snap == 'ceiling':
@@ -119,8 +152,37 @@ class TokenMap:
                     return i - 1
                 return i
 
-        # Past the last token
-        return len(ranges) - 1
+        # Past the last token: nothing to the right on this line
+        return None if snap == 'ceiling' else len(ranges) - 1
+
+    def is_after_last_token(self, slate_line: int, char_offset: int) -> bool:
+        """True if no token on *slate_line* ends at or after *char_offset*."""
+        ranges = self.token_ranges[slate_line] if 0 <= slate_line < len(self.token_ranges) else []
+        return not ranges or char_offset > ranges[-1][1]
+
+    def is_before_first_token(self, slate_line: int, char_offset: int) -> bool:
+        """True if no token on *slate_line* starts at or before *char_offset*."""
+        ranges = self.token_ranges[slate_line] if 0 <= slate_line < len(self.token_ranges) else []
+        return not ranges or char_offset < ranges[0][0]
+
+    def prev_token(self, slate_line: int, token: int) -> Optional[Tuple[int, int]]:
+        """The (line, token) position just before this one, skipping blank lines."""
+        if token > 0:
+            return (slate_line, token - 1)
+        for ln in range(slate_line - 1, -1, -1):
+            n = self.num_tokens(ln)
+            if n:
+                return (ln, n - 1)
+        return None
+
+    def next_token(self, slate_line: int, token: int) -> Optional[Tuple[int, int]]:
+        """The (line, token) position just after this one, skipping blank lines."""
+        if token + 1 < self.num_tokens(slate_line):
+            return (slate_line, token + 1)
+        for ln in range(slate_line + 1, self.num_lines()):
+            if self.num_tokens(ln):
+                return (ln, 0)
+        return None
 
     def token_char_range(self, slate_line: int, token: int) -> Optional[Tuple[int, int]]:
         """Return (start_char, end_char_inclusive) of a token, or None."""
@@ -312,6 +374,58 @@ class AnnotationSet:
             )
             return True
 
+    def add_label(
+        self, line: int, start: int, end: int, label: str,
+        end_line: Optional[int] = None,
+    ) -> None:
+        """Ensure *label* is on the span (line, start) – (end_line, end)."""
+        existing = self.get_at_span(line, start, end, end_line=end_line)
+        if existing is not None:
+            existing.labels.add(label)
+        else:
+            self.annotations.append(
+                Annotation(line, start, end, {label}, end_line=end_line)
+            )
+
+    def remove_labels_in_range(
+        self, labels: Set[str],
+        start_line: int, start_tok: int, end_line: int, end_tok: int,
+        token_map: 'TokenMap',
+    ) -> None:
+        """Remove *labels* from the tokens inside the span, and only there.
+
+        An annotation that extends beyond the span keeps those labels on the
+        part outside it: they are re-added as separate annotations covering
+        the leftover piece before and/or after the span.  The annotation's
+        other labels keep their original boundaries.
+        """
+        span_start = (start_line, start_tok)
+        span_end = (end_line, end_tok)
+        leftovers = []   # (piece_start, piece_end, labels)
+        for ann in list(self.annotations):
+            if not ann.overlaps_span_range(start_line, start_tok, end_line, end_tok):
+                continue
+            removed = ann.labels & labels
+            if not removed:
+                continue
+            ann.labels -= removed
+            if not ann.labels:
+                self.annotations.remove(ann)
+            ann_start = (ann.line, ann.start_token)
+            ann_end = (ann.end_line, ann.end_token)
+            if ann_start < span_start:
+                before = token_map.prev_token(*span_start)
+                if before is not None and ann_start <= before:
+                    leftovers.append((ann_start, before, removed))
+            if ann_end > span_end:
+                after = token_map.next_token(*span_end)
+                if after is not None and after <= ann_end:
+                    leftovers.append((after, ann_end, removed))
+        for (l1, t1), (l2, t2), piece_labels in leftovers:
+            for label in piece_labels:
+                self.add_label(l1, t1, t2, label,
+                               end_line=l2 if l2 != l1 else None)
+
     def remove_overlapping(self, line: int, start: int, end: int) -> None:
         """Remove every annotation that overlaps (line, start–end)."""
         s, e = min(start, end), max(start, end)
@@ -393,32 +507,48 @@ class AnnotationSet:
 # Adjudication support
 # ---------------------------------------------------------------------------
 
-def find_annotator_info(
-    folder: str, txt_basenames: List[str],
-) -> Tuple[str, Dict[str, str]]:
-    """Scan *folder* for annotation files corresponding to *txt_basenames*.
+# Annotator-name slot used for adjudication output files
+# (``<txt>.adjudications.annotations``); never treated as an annotator.
+ADJUDICATION_NAME = 'adjudications'
+ANNOTATION_SUFFIX = '.annotations'
 
-    Returns (annotator_name, file_map) where *file_map* maps each
-    txt basename to the full path of the matching annotation file.
-    *annotator_name* is extracted from the filename pattern
-    (e.g. ``04.txt.alice.annotations`` → ``alice``) or ``''`` if
-    no name is embedded.
+
+def find_annotators(
+    folder: str, txt_basenames: List[str],
+) -> List[Tuple[str, Dict[str, str]]]:
+    """Find every annotator's annotation files in *folder*.
+
+    Files are named ``<txt>.annotations`` (no annotator name) or
+    ``<txt>.<name>.annotations``.  A folder may hold several annotators'
+    files (e.g. a shared ``-o`` output folder); each distinct name is
+    returned as a separate annotator.  Adjudication output
+    (``<txt>.adjudications.annotations``) is ignored.
+
+    Returns a list of (annotator_name, file_map) sorted by name, where
+    *file_map* maps a txt basename to that annotator's annotation file and
+    *annotator_name* is ``''`` for files without an embedded name.
     """
-    file_map: Dict[str, str] = {}
-    name = ''
-    entries = os.listdir(folder)
-    for basename in txt_basenames:
-        for entry in entries:
-            if not entry.endswith('.annotations'):
+    # Try longer basenames first so "a.txt.b.txt" is not read as "a.txt" + name
+    by_length = sorted(txt_basenames, key=len, reverse=True)
+    found: Dict[str, Dict[str, str]] = {}
+    for entry in sorted(os.listdir(folder)):
+        if not entry.endswith(ANNOTATION_SUFFIX):
+            continue
+        path = os.path.join(folder, entry)
+        if not os.path.isfile(path):
+            continue
+        stem = entry[:-len(ANNOTATION_SUFFIX)]
+        for basename in by_length:
+            if stem == basename:
+                name = ''
+            elif stem.startswith(basename + '.'):
+                name = stem[len(basename) + 1:]
+            else:
                 continue
-            if not entry.startswith(basename):
-                continue
-            middle = entry[len(basename):-len('.annotations')].strip('.')
-            if middle and not name:
-                name = middle
-            file_map[basename] = os.path.join(folder, entry)
+            if name != ADJUDICATION_NAME:
+                found.setdefault(name, {})[basename] = path
             break
-    return name, file_map
+    return sorted(found.items())
 
 
 def compute_adjudication(

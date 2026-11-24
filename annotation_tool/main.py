@@ -12,8 +12,28 @@ import os
 import sys
 
 from .config import Config
-from .data import find_annotator_info, get_txt_files
+from .data import find_annotators, get_txt_files, read_text
 from .gui import run_app
+
+
+def _readable_files(paths: list) -> list:
+    """Return the paths that can be read as UTF-8, warning about the rest."""
+    readable = []
+    for path in paths:
+        name = os.path.basename(path)
+        try:
+            read_text(path)
+        except UnicodeDecodeError as exc:
+            print(f"Warning: skipping {name!r}: not valid UTF-8 "
+                  f"(byte 0x{exc.object[exc.start]:02x} at position {exc.start}). "
+                  f"Re-save it with UTF-8 encoding to annotate it.",
+                  file=sys.stderr)
+        except OSError as exc:
+            print(f"Warning: skipping {name!r}: {exc.strerror or exc}",
+                  file=sys.stderr)
+        else:
+            readable.append(path)
+    return readable
 
 
 def main() -> None:
@@ -105,6 +125,11 @@ Examples:
     if not files:
         print(f"Error: no .txt files found in {args.folder!r}", file=sys.stderr)
         sys.exit(1)
+    files = _readable_files(files)
+    if not files:
+        print(f"Error: none of the .txt files in {args.folder!r} could be read",
+              file=sys.stderr)
+        sys.exit(1)
 
     output_dir = args.output
     if output_dir:
@@ -131,16 +156,38 @@ Examples:
 
         txt_basenames = [os.path.basename(f) for f in files]
         annotator_data = []
+        used_names: set = set()
+        seen_dirs: set = set()
         unnamed_counter = 1
 
         for p in args.paths:
-            name, file_map = find_annotator_info(p, txt_basenames)
-            if name:
-                name = name.capitalize()
-            else:
-                name = f"Annotator {unnamed_counter}"
-                unnamed_counter += 1
-            annotator_data.append((name, file_map))
+            real = os.path.realpath(p)
+            if real in seen_dirs:
+                print(f"Warning: {p!r} was given more than once; using it once.",
+                      file=sys.stderr)
+                continue
+            seen_dirs.add(real)
+
+            found = find_annotators(p, txt_basenames)
+            if not found:
+                print(f"Error: no annotation files for the .txt files in "
+                      f"{args.folder!r} were found in {p!r}", file=sys.stderr)
+                sys.exit(1)
+
+            for raw_name, file_map in found:
+                if raw_name:
+                    name = raw_name[0].upper() + raw_name[1:]
+                else:
+                    name = f"Annotator {unnamed_counter}"
+                    unnamed_counter += 1
+                # Names key the per-annotator data, so they must be unique
+                # (e.g. "alice" in two folders, or "alice" and "Alice").
+                unique, n = name, 2
+                while unique in used_names:
+                    unique = f"{name} ({n})"
+                    n += 1
+                used_names.add(unique)
+                annotator_data.append((unique, file_map))
 
         print(f"Mode    : Adjudication")
         print(f"Files   : {len(files)}")

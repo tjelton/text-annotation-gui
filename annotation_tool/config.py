@@ -77,6 +77,7 @@ class Config:
     @classmethod
     def from_file(cls, filepath: str) -> 'Config':
         config = cls()
+        name_lines: Dict[str, int] = {}   # label name → line it was defined on
         with open(filepath, 'r', encoding='utf-8') as f:
             for lineno, raw in enumerate(f, 1):
                 line = raw.strip()
@@ -108,6 +109,12 @@ class Config:
                         f"Config line {lineno}: key {key!r} already used by "
                         f"label '{config.labels[key].name}'"
                     )
+                if name in name_lines:
+                    raise ValueError(
+                        f"Config line {lineno}: label name {name!r} is already "
+                        f"defined on line {name_lines[name]}"
+                    )
+                name_lines[name] = lineno
 
                 # Resolve appearance: text style or colour
                 if colour.lower() in STYLE_SET:
@@ -124,8 +131,11 @@ class Config:
                     group = group_match.group(1)
 
                 internal = f"label:{name}"
-                # Tag name must be safe for tkinter (no : - special chars)
-                tag = 'lbl_' + re.sub(r'[^A-Za-z0-9_]', '_', name)
+                # Tag name must be safe for tkinter (no : - special chars).
+                # The index keeps it unique: "F-UP" and "F_UP" would
+                # otherwise both become "lbl_F_UP" and share one style.
+                safe = re.sub(r'[^A-Za-z0-9_]', '_', name)
+                tag = f'lbl_{len(config.labels)}_{safe}'
 
                 lc = LabelConfig(
                     name=name, internal=internal,
@@ -143,8 +153,8 @@ class Config:
 
 
 def _resolve_colour(colour: str, lineno: int) -> str:
-    if colour in COLOUR_MAP:
-        return COLOUR_MAP[colour]
+    if colour.lower() in COLOUR_MAP:
+        return COLOUR_MAP[colour.lower()]
     # Accept #RGB or #RRGGBB
     if re.match(r'^#[0-9A-Fa-f]{3}$', colour):
         r, g, b = colour[1], colour[2], colour[3]

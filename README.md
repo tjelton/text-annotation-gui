@@ -117,7 +117,7 @@ Press **Ctrl+S** (or the **Save** button) at any time. You do not need to save b
 
 ### 7. Quit
 
-Close the window or press **Ctrl+Q**. If there are unsaved changes you will be asked whether to save before quitting.
+Close the window or press **Ctrl+Q** (or **Cmd+Q** on macOS). If there are unsaved changes you will be asked whether to save before quitting. If saving fails (e.g. the folder is read-only or locked by a sync client), the tool stays open unless you confirm you want to discard the changes — the same applies when moving to another file.
 
 ---
 
@@ -133,7 +133,7 @@ Close the window or press **Ctrl+Q**. If there are unsaved changes you will be a
 | `Ctrl+Z` | Undo last annotation action |
 | `Ctrl+Q` | Quit (prompts to save if unsaved changes exist) |
 | `Escape` | Clear the current selection |
-| `↑` `↓` `Page Up` `Page Down` | Scroll the text area |
+| `↑` `↓` `Page Up` `Page Down` `Home` `End` | Scroll the text area (the selection is kept) |
 
 > Label keys are defined in your configuration file. They cannot conflict with the reserved keys listed above (`[`, `]`, `u`).
 
@@ -170,7 +170,7 @@ Each `Label:` line has three required fields and one optional field (whitespace-
 
 ### Supported colour names
 
-`red`, `blue`, `green`, `yellow`, `magenta`, `purple`, `cyan`, `orange`, `pink`, `brown`, `white`, `black`, `lime`, `indigo`, `teal`, `coral`, `navy`
+`red`, `blue`, `green`, `yellow`, `magenta`, `purple`, `cyan`, `orange`, `pink`, `brown`, `white`, `black`, `lime`, `indigo`, `teal`, `coral`, `navy` (case-insensitive)
 
 Any standard hex colour (`#RRGGBB` or `#RGB`) is also accepted.
 
@@ -200,6 +200,8 @@ Label:  MISC    m   #9b59b6
 ### Mutual-exclusion groups
 
 Labels that share a `group` are mutually exclusive: applying one to a token automatically removes any other label from the same group on that token. This is useful when a set of labels represents alternatives (e.g. categories that cannot overlap).
+
+Only the selected tokens are affected. For example, if tokens 0–5 are labelled `SELF` and you select tokens 2–3 and press the `TASK` key, the result is `SELF` on 0–1, `TASK` on 2–3, and `SELF` on 4–5.
 
 ```
 # SELF, TASK, PROC, and SREG are mutually exclusive
@@ -294,7 +296,7 @@ Each line in the annotation file describes one annotated span. Using NER as an e
 
 - Lines and tokens are **0-indexed**.
 - Tokenisation matches slate exactly: each line is split on whitespace after stripping leading/trailing spaces. Empty lines count as a line number but contain no tokens.
-- A multi-line selection is stored as one annotation per line (slate does not support cross-line spans).
+- A multi-line selection is stored as a single span from its first token to its last, e.g. `((0, 95), (2, 4)) - label:PER`. slate reads and writes cross-line spans in this same form.
 
 **Label prefix:** All label names in the output are prefixed with `label:` (e.g. `label:PER`), matching slate's internal convention.
 
@@ -337,13 +339,18 @@ When multiple annotators have independently annotated the same files, adjudicati
 python3 -m annotation_tool adjudicate -f ./texts -c config.txt -p ./ann_alice ./ann_bob
 ```
 
-Each `-p` path is a folder containing one annotator's `.annotations` files. The tool matches them to the `.txt` files in `-f` by basename.
+Each `-p` path is a folder of `.annotations` files, matched to the `.txt` files in `-f` by basename. A folder may hold one annotator's files or several (e.g. the shared `./annotations` folder from the [multi-annotator workflow](#multi-annotator-workflows)); each distinct annotator name in the filenames becomes a separate annotator. Adjudication output (`.adjudications.annotations`) is never treated as an annotator. A `-p` folder with no matching annotation files is an error.
+
+```bash
+# Annotators who wrote to a shared output folder
+python3 -m annotation_tool adjudicate -f ./texts -c config.txt -p ./annotations
+```
 
 | Argument | Description |
 |---|---|
 | `-f`, `--folder` | Folder containing the original `.txt` files |
 | `-c`, `--config` | Path to the label configuration file (same as annotation mode) |
-| `-p`, `--paths DIR [DIR ...]` | One or more folders, each containing one annotator's `.annotations` files |
+| `-p`, `--paths DIR [DIR ...]` | One or more folders of annotators' `.annotations` files |
 | `-o`, `--output DIR` | *(Optional)* Directory for the adjudicated output files. Defaults to the input folder. |
 
 ```bash
@@ -362,7 +369,7 @@ The adjudicator uses the same label controls as annotation mode to resolve disag
 
 ### Annotator names
 
-Annotator names are extracted automatically from annotation filenames. For example, `04.txt.alice.annotations` yields the name "Alice". If no name is embedded (e.g. `04.txt.annotations`), annotators are labelled "Annotator 1", "Annotator 2", etc.
+Annotator names are extracted automatically from annotation filenames. For example, `04.txt.alice.annotations` yields the name "Alice". If no name is embedded (e.g. `04.txt.annotations`), annotators are labelled "Annotator 1", "Annotator 2", etc. If two annotators end up with the same name (e.g. `alice` in two different folders), the second is shown as "Alice (2)".
 
 ### Viewing individual annotators
 
@@ -395,7 +402,9 @@ If you close the tool and reopen it with the same command, existing `.adjudicati
 
 ## Tips and Common Questions
 
-**Files are loaded in natural sort order** (`1.txt`, `2.txt`, … `10.txt`, not `1.txt`, `10.txt`, `2.txt`), so numbering your input files works as expected.
+**Files are loaded in natural sort order** (`1.txt`, `2.txt`, … `10.txt`, not `1.txt`, `10.txt`, `2.txt`), so numbering your input files works as expected. Hidden files (such as macOS `._01.txt` metadata files) are ignored.
+
+**Text files must be UTF-8.** Files in another encoding (e.g. Windows-1252, common for text copied out of Word) are skipped with a warning in the terminal naming the file. Re-save them as UTF-8 to annotate them.
 
 **Annotations are auto-saved when navigating.** You will not lose work by clicking Next or Previous. Manual save (`Ctrl+S`) is available if you want to save mid-file.
 

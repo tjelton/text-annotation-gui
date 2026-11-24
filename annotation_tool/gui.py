@@ -15,6 +15,7 @@ Layout (top to bottom):
     └─────────────────────────────────────────────┘
 """
 
+import itertools
 import os
 import sys
 import tkinter as tk
@@ -23,7 +24,10 @@ import tkinter.font as tkfont
 from typing import List, Optional, Tuple
 
 from .config import Config, LabelConfig
-from .data import AnnotationSet, TokenMap, compute_adjudication, get_txt_files
+from .data import (
+    ADJUDICATION_NAME, ANNOTATION_SUFFIX, AnnotationSet, TokenMap,
+    compute_adjudication, read_text,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -86,6 +90,7 @@ class AnnotationApp:
 
         # Cache for composite style tags (used when multiple style labels overlap)
         self._combo_tags: dict = {}
+        self._combo_ids = itertools.count()   # never reused, so names can't clash
 
         # Adjudication mode
         self._adjudication_mode: bool = adjudication_annotators is not None
@@ -100,9 +105,27 @@ class AnnotationApp:
         self._annotator_sets_cache: dict = {}  # name → AnnotationSet for current file
 
         self._build_ui()
+        self._astral_width = self._measure_astral_width()
         self._configure_tags()
         self._bind_keys()
-        self._load_file(0)
+        for idx in range(len(self.files)):
+            if self._load_file(idx):
+                break
+
+    def _measure_astral_width(self) -> int:
+        """How many Tk index positions one emoji (non-BMP character) occupies.
+
+        Tk 9 counts it as one character; Tk 8.6 as two (a UTF-16 surrogate
+        pair); older builds can differ again — so measure rather than assume.
+        """
+        probe = tk.Text(self.root)
+        try:
+            probe.insert('1.0', '\U0001F600')
+            return int(probe.index('1.end').split('.')[1]) or 1
+        except tk.TclError:
+            return 1
+        finally:
+            probe.destroy()
 
     # ------------------------------------------------------------------
     # UI construction
@@ -399,8 +422,19 @@ class AnnotationApp:
         self.text_widget.bind('<Motion>', self._on_mouse_motion)
         self.text_widget.bind('<Leave>', self._on_mouse_leave)
 
+        # The widget stays in 'normal' state so it receives key events, so
+        # also block the non-keyboard ways Tk can edit it — notably a
+        # middle-click, which pastes the selection into the document.
+        for seq in ('<<Paste>>', '<<PasteSelection>>', '<<Cut>>',
+                    '<<Clear>>', '<<Undo>>', '<<Redo>>'):
+            self.text_widget.bind(seq, lambda _e: 'break')
+
         # Window close
         self.root.protocol('WM_DELETE_WINDOW', self._quit)
+        # macOS: the app menu's Quit item (and Cmd+Q) bypass WM_DELETE_WINDOW
+        # and exit immediately unless this handler is defined.
+        if self.root.tk.call('tk', 'windowingsystem') == 'aqua':
+            self.root.tk.createcommand('::tk::mac::Quit', self._quit)
 
     def _on_key_press(self, event: tk.Event) -> str:
         """
@@ -428,8 +462,14 @@ class AnnotationApp:
                 self._change_font_size(1)
             elif k == 'minus':
                 self._change_font_size(-1)
-            elif k in ('c', 'a'):
-                return  # Allow copy and select-all
+            elif k == 'c':
+                return  # Allow copy
+            elif k == 'a':
+                # Let Tk handle select-all, then re-snap so the stored span
+                # matches whatever is now selected (or clear it if nothing is).
+                self._drag_anchor = None
+                self.root.after(15, self._snap_selection)
+                return
             return 'break'
 
         # --- Escape ----------------------------------------------------------
@@ -440,10 +480,15 @@ class AnnotationApp:
                 self._clear_selection()
             return 'break'
 
+        # --- Scrolling -------------------------------------------------------
+        # Scroll the view directly: Tk's default bindings for these keys move
+        # the insert cursor and clear the visible selection, which would leave
+        # a label key to act on a span the user can no longer see.
+        if self._scroll_for_key(keysym):
+            return 'break'
+
         # --- Read-only when viewing an annotator ----------------------------
         if self._viewing_annotator:
-            if keysym in ('Up', 'Down', 'Prior', 'Next', 'Home', 'End'):
-                return
             return 'break'
 
         # --- Navigation keys -----------------------------------------------
@@ -461,10 +506,6 @@ class AnnotationApp:
             self._remove_selected_annotations()
             return 'break'
 
-        # --- Scrolling (allow default behaviour) -----------------------------
-        if keysym in ('Up', 'Down', 'Prior', 'Next', 'Home', 'End'):
-            return  # Let the Text widget scroll normally
-
         # --- Label keys (from config) ----------------------------------------
         if char and char in self.config.labels:
             self._apply_label(self.config.labels[char])
@@ -473,6 +514,25 @@ class AnnotationApp:
         # --- Block everything else -------------------------------------------
         return 'break'
 
+    _SCROLL_KEYS = {
+        'Up': (-1, 'units'), 'Down': (1, 'units'),
+        'Prior': (-1, 'pages'), 'Next': (1, 'pages'),
+    }
+
+    def _scroll_for_key(self, keysym: str) -> bool:
+        """Scroll the text for a navigation key; return True if handled."""
+        keysym = keysym[3:] if keysym.startswith('KP_') else keysym
+        if keysym in self._SCROLL_KEYS:
+            amount, what = self._SCROLL_KEYS[keysym]
+            self.text_widget.yview_scroll(amount, what)
+        elif keysym == 'Home':
+            self.text_widget.yview_moveto(0.0)
+        elif keysym == 'End':
+            self.text_widget.yview_moveto(1.0)
+        else:
+            return False
+        return True
+
     # ------------------------------------------------------------------
     # File I/O
     # ------------------------------------------------------------------
@@ -480,32 +540,47 @@ class AnnotationApp:
     def _annotation_path(self, filepath: str) -> str:
         basename = os.path.basename(filepath)
         if self._adjudication_mode:
-            ann_filename = f"{basename}.adjudications.annotations"
+            ann_filename = f"{basename}.{ADJUDICATION_NAME}{ANNOTATION_SUFFIX}"
         elif self.annotator:
-            ann_filename = f"{basename}.{self.annotator}.annotations"
+            ann_filename = f"{basename}.{self.annotator}{ANNOTATION_SUFFIX}"
         else:
-            ann_filename = f"{basename}.annotations"
+            ann_filename = f"{basename}{ANNOTATION_SUFFIX}"
         if self.output_dir:
             return os.path.join(self.output_dir, ann_filename)
         return os.path.join(os.path.dirname(filepath), ann_filename)
 
-    def _load_file(self, idx: int) -> None:
+    def _load_file(self, idx: int) -> bool:
+        """Load file *idx*; return False (leaving the current file as it
+        was) if it or its annotations cannot be read."""
         if idx < 0 or idx >= len(self.files):
-            return
+            return False
+
+        filepath = self.files[idx]
+        basename = os.path.basename(filepath)
+        ann_path = self._annotation_path(filepath)
+
+        # Read everything before touching any state, so a failure can't
+        # leave current_idx pointing at one file and the annotations of
+        # another (the next save would then write them to the wrong file).
+        try:
+            content = read_text(filepath)
+            token_map = TokenMap(content, astral_width=self._astral_width)
+            annotation_set = AnnotationSet.load(ann_path)
+            annotator_sets = []
+            if self._adjudication_mode:
+                for name, file_map in self._adjudication_annotators:
+                    ann_file = file_map.get(basename)
+                    aset = AnnotationSet.load(ann_file) if ann_file else AnnotationSet()
+                    annotator_sets.append((name, aset))
+        except (OSError, ValueError) as exc:   # UnicodeDecodeError is a ValueError
+            self.status_var.set(f"Could not open {basename}: {exc}")
+            messagebox.showerror(
+                "Could not open file", f"{basename} could not be opened:\n{exc}",
+            )
+            return False
 
         self.current_idx = idx
-        filepath = self.files[idx]
-
-        # Read raw text
-        try:
-            with open(filepath, 'r', encoding='utf-8') as f:
-                content = f.read()
-        except OSError as exc:
-            self.status_var.set(f"Error reading {os.path.basename(filepath)}: {exc}")
-            return
-
-        # Build token map
-        self.token_map = TokenMap(content)
+        self.token_map = token_map
 
         # Check the file has at least one token
         total_tokens = sum(
@@ -513,13 +588,10 @@ class AnnotationApp:
             for l in range(self.token_map.num_lines())
         )
         if total_tokens == 0:
-            self.status_var.set(
-                f"Warning: {os.path.basename(filepath)} appears to be empty."
-            )
+            self.status_var.set(f"Warning: {basename} appears to be empty.")
 
         # Load (or reset) annotations
-        ann_path = self._annotation_path(filepath)
-        self.annotation_set = AnnotationSet.load(ann_path)
+        self.annotation_set = annotation_set
         self.undo_stack.clear()
         self.has_unsaved = False
         self.current_span = None
@@ -535,17 +607,7 @@ class AnnotationApp:
             if hasattr(self, '_view_banner'):
                 self._view_banner.pack_forget()
 
-            basename = os.path.basename(filepath)
-            annotator_sets = []
-            self._annotator_sets_cache.clear()
-            for name, file_map in self._adjudication_annotators:
-                ann_file = file_map.get(basename)
-                if ann_file:
-                    aset = AnnotationSet.load(ann_file)
-                else:
-                    aset = AnnotationSet()
-                annotator_sets.append((name, aset))
-                self._annotator_sets_cache[name] = aset
+            self._annotator_sets_cache = dict(annotator_sets)
 
             agreed, disagreements, details = compute_adjudication(
                 annotator_sets, self.token_map,
@@ -568,8 +630,9 @@ class AnnotationApp:
 
         # Update header / status
         self._update_header()
-        self.status_var.set(f"Loaded: {os.path.basename(filepath)}")
+        self.status_var.set(f"Loaded: {basename}")
         self.text_widget.focus_set()
+        return True
 
     def _update_header(self) -> None:
         filepath = self.files[self.current_idx]
@@ -819,10 +882,7 @@ class AnnotationApp:
         if not opts:
             return self.MULTI_LABEL_TAG
 
-        # Build a deterministic tag name
-        tag_name = 'combo_' + '_'.join(
-            s.replace(':', '_').replace('-', '_') for s in sorted(labels)
-        )
+        tag_name = f'combo_{next(self._combo_ids)}'
         self.text_widget.tag_configure(tag_name, **opts)
         self._combo_tags[key] = tag_name
         return tag_name
@@ -1050,9 +1110,15 @@ class AnnotationApp:
         for ann in self.annotation_set.annotations:
             if ann.overlaps_span(slate_line, token, token):
                 for internal in sorted(ann.labels):
-                    lc = self.config.internal_to_config.get(internal)
-                    names.append(lc.name if lc else internal.removeprefix('label:'))
+                    names.append(self._label_display_name(internal))
         self._update_cursor_tags(names)
+
+    def _label_display_name(self, internal: str) -> str:
+        """Display name for an internal label, e.g. 'label:F-UP' → 'F-UP'."""
+        lc = self.config.internal_to_config.get(internal)
+        if lc:
+            return lc.name
+        return internal[len('label:'):] if internal.startswith('label:') else internal
 
     def _on_mouse_leave(self, _event: tk.Event) -> None:
         """Clear hover-dependent displays when the mouse leaves the text."""
@@ -1079,12 +1145,7 @@ class AnnotationApp:
         for name in self._annotator_names:
             labels = info.get(name, set())
             if labels:
-                label_names = []
-                for internal in sorted(labels):
-                    lc = self.config.internal_to_config.get(internal)
-                    label_names.append(
-                        lc.name if lc else internal.removeprefix('label:')
-                    )
+                label_names = [self._label_display_name(i) for i in sorted(labels)]
                 lines.append(f"{name}:  {', '.join(label_names)}")
             else:
                 lines.append(f"{name}:  \u2014")
@@ -1121,19 +1182,24 @@ class AnnotationApp:
         start_tk_line, start_tk_char = [int(x) for x in raw_start.split('.')]
         end_tk_line,   end_tk_char   = [int(x) for x in raw_end.split('.')]
 
+        # If sel.last is at char 0 of a line (e.g. a triple-click selects a
+        # line plus its newline), the selection actually ends at the end of
+        # the previous line.  Use that line's widget end so the pipe
+        # adjustment below is applied to the right line.
+        if end_tk_char == 0 and end_tk_line > 1:
+            end_tk_line -= 1
+            end_tk_char = int(
+                self.text_widget.index(f"{end_tk_line}.end").split('.')[1]
+            )
+
         start_sl = start_tk_line - 1   # slate 0-indexed line
         end_sl   = end_tk_line   - 1
-
-        # If sel.last is at char 0 of a line, the selection actually ends
-        # just before that line (i.e. at the end of the previous line).
-        if end_tk_char == 0 and end_sl > 0:
-            end_sl -= 1
-            end_tk_char = len(self.token_map.raw_lines[end_sl])
 
         # Subtract any pipe-delimiter characters inserted before each position
         # so that the offsets match the original text that TokenMap knows about.
         start_tk_char = self._strip_pipe_offset(start_tk_line, start_tk_char)
         end_tk_char   = self._strip_pipe_offset(end_tk_line,   end_tk_char)
+        last_char     = end_tk_char - 1   # sel.last is exclusive
 
         # --- Determine drag direction from stored anchor -------------------
         # Anchor is at sel.first for L→R drags, sel.last for R→L drags.
@@ -1146,42 +1212,41 @@ class AnnotationApp:
                 pass
 
         # --- Resolve tokens -----------------------------------------------
-        # sel.last is exclusive, so subtract 1 to get the actual last char.
         # L→R: floor-snap the end (don't overshoot right into the next token).
         # R→L: ceiling-snap the start (don't overshoot left into the prev token).
-        if ltr:
-            start_tok = self.token_map.char_to_token(start_sl, start_tk_char, snap='nearest')
-            end_tok   = self.token_map.char_to_token(end_sl, max(0, end_tk_char - 1), snap='floor')
+        # In either direction, a start past the last token of its line (or an
+        # end before the first token of its line) selects nothing on that
+        # line, so it resolves to None and moves to the adjacent line below.
+        start_snap, end_snap = ('nearest', 'floor') if ltr else ('ceiling', 'nearest')
+        if self.token_map.is_after_last_token(start_sl, start_tk_char):
+            start_tok = None
         else:
-            start_tok = self.token_map.char_to_token(start_sl, start_tk_char, snap='ceiling')
-            end_tok   = self.token_map.char_to_token(end_sl, max(0, end_tk_char - 1), snap='nearest')
+            start_tok = self.token_map.char_to_token(start_sl, start_tk_char, snap=start_snap)
+        if last_char < 0 or self.token_map.is_before_first_token(end_sl, last_char):
+            end_tok = None
+        else:
+            end_tok = self.token_map.char_to_token(end_sl, last_char, snap=end_snap)
 
-        # If the start line has no tokens, advance to the next line that does
+        # No token at/after the start on its line: begin at the next line that has one
         if start_tok is None:
-            for ln in range(start_sl, self.token_map.num_lines()):
+            for ln in range(start_sl + 1, self.token_map.num_lines()):
                 if self.token_map.num_tokens(ln) > 0:
-                    start_sl  = ln
-                    start_tok = 0
+                    start_sl, start_tok = ln, 0
                     break
-            else:
-                self.current_span = None
-                return
 
-        # If the end line has no tokens, retreat to the previous line that does
+        # No token at/before the end on its line: finish at the previous line that has one
         if end_tok is None:
-            for ln in range(end_sl, -1, -1):
+            for ln in range(end_sl - 1, -1, -1):
                 if self.token_map.num_tokens(ln) > 0:
-                    end_sl  = ln
-                    end_tok = self.token_map.num_tokens(ln) - 1
+                    end_sl, end_tok = ln, self.token_map.num_tokens(ln) - 1
                     break
-            else:
-                self.current_span = None
-                return
 
-        # Normalise so start ≤ end
-        if end_sl < start_sl or (end_sl == start_sl and end_tok < start_tok):
-            start_sl, end_sl     = end_sl, start_sl
-            start_tok, end_tok   = end_tok, start_tok
+        # Nothing to select (only whitespace or blank lines were selected)
+        if (start_tok is None or end_tok is None
+                or (end_sl, end_tok) < (start_sl, start_tok)):
+            self._clear_selection()
+            self.status_var.set("No words in selection")
+            return
 
         self.current_span = (start_sl, start_tok, end_sl, end_tok)
 
@@ -1225,17 +1290,14 @@ class AnnotationApp:
         self.undo_stack.append(self.annotation_set.copy())
 
         # Mutual-exclusion: if this label belongs to a group, remove any
-        # other labels from the same group on tokens covered by the span.
+        # other labels from the same group on the tokens covered by the span
+        # (an annotation extending beyond the span keeps them elsewhere).
         if lc.group and lc.group in self.config.groups:
             rivals = self.config.groups[lc.group] - {lc.internal}
             if rivals:
-                for ann in list(self.annotation_set.annotations):
-                    if ann.overlaps_span_range(start_sl, start_tok, end_sl, end_tok):
-                        removed = ann.labels & rivals
-                        if removed:
-                            ann.labels -= removed
-                            if not ann.labels:
-                                self.annotation_set.annotations.remove(ann)
+                self.annotation_set.remove_labels_in_range(
+                    rivals, start_sl, start_tok, end_sl, end_tok, self.token_map,
+                )
 
         added = self.annotation_set.toggle_label(
             start_sl, start_tok, end_tok, lc.internal,
@@ -1321,39 +1383,70 @@ class AnnotationApp:
                 for internal in sorted(ann.labels):
                     if internal not in seen:
                         seen.add(internal)
-                        lc = self.config.internal_to_config.get(internal)
-                        names.append(lc.name if lc else internal.removeprefix('label:'))
+                        names.append(self._label_display_name(internal))
         return names
 
     # ------------------------------------------------------------------
     # Save / navigate
     # ------------------------------------------------------------------
 
-    def _save_current(self) -> None:
-        if not self.files:
-            return
-        filepath  = self.files[self.current_idx]
-        ann_path  = self._annotation_path(filepath)
+    def _working_annotations(self) -> AnnotationSet:
+        """The annotations being edited for the current file.
+
+        While an annotator's work is being viewed (adjudication mode),
+        self.annotation_set temporarily holds *their* annotations; the
+        adjudicator's own are parked in self._saved_annotation_set.
+        """
+        if self._viewing_annotator is not None and self._saved_annotation_set is not None:
+            return self._saved_annotation_set
+        return self.annotation_set
+
+    def _try_save(self) -> Optional[OSError]:
+        """Save the current file's annotations; return the error, or None."""
+        if self.token_map is None:
+            return None   # no file loaded, so nothing to save
+        ann_path = self._annotation_path(self.files[self.current_idx])
         try:
-            self.annotation_set.save(ann_path)
-            self.has_unsaved = False
-            self.status_var.set(f"Saved → {os.path.basename(ann_path)}")
+            self._working_annotations().save(ann_path)
         except OSError as exc:
-            messagebox.showerror("Save Error", f"Could not save:\n{exc}")
+            return exc
+        self.has_unsaved = False
+        self.status_var.set(f"Saved → {os.path.basename(ann_path)}")
+        return None
+
+    def _save_current(self) -> None:
+        err = self._try_save()
+        if err is not None:
+            messagebox.showerror("Save Error", f"Could not save:\n{err}")
+
+    def _confirm_discard(self, err: OSError, action: str) -> bool:
+        """After a failed save, ask whether to *action* anyway (losing changes)."""
+        return messagebox.askyesno(
+            "Save Error",
+            f"Could not save:\n{err}\n\n{action} anyway and discard your changes?",
+            icon='warning', default='no',
+        )
+
+    def _save_before_leaving(self, action: str) -> bool:
+        """Save before leaving the current file; return True if OK to leave."""
+        err = self._try_save()
+        if err is None or not self.has_unsaved:
+            return True
+        return self._confirm_discard(err, action)
 
     def _go_next(self) -> None:
         if self.current_idx >= len(self.files) - 1:
             self.status_var.set("Already at the last file")
             return
-        self._save_current()
-        self._load_file(self.current_idx + 1)
+        if self._save_before_leaving("Go to the next file"):
+            self._load_file(self.current_idx + 1)
 
     def _go_prev(self) -> None:
         if self.current_idx <= 0:
             self.status_var.set("Already at the first file")
             return
-        self._save_current()
-        self._load_file(self.current_idx - 1)
+        if self._save_before_leaving("Go to the previous file"):
+            self._load_file(self.current_idx - 1)
 
     def _show_help(self) -> None:
         """Open a modal help window with keyboard shortcut reference."""
@@ -1427,7 +1520,9 @@ class AnnotationApp:
             self._reposition_ann_info()
         # Reconfigure style-based tags with the new size
         self._configure_tags()
-        # Invalidate combo-tag cache so they are rebuilt at the new size
+        # Drop the combo tags (and their ranges) so they are rebuilt at the new size
+        for combo_tag in self._combo_tags.values():
+            self.text_widget.tag_delete(combo_tag)
         self._combo_tags.clear()
         if self.token_map is not None:
             self._redraw_annotations()
@@ -1441,7 +1536,9 @@ class AnnotationApp:
             if answer is None:   # Cancel
                 return
             if answer:           # Yes
-                self._save_current()
+                err = self._try_save()
+                if err is not None and not self._confirm_discard(err, "Quit"):
+                    return
         self.root.destroy()
 
 
