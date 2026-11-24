@@ -79,7 +79,7 @@ This opens the annotation window. Select text, press a label key, and your annot
 |---|---|
 | **Header** | Current filename, annotator name, progress counter, navigation and action buttons |
 | **Text area** | The document being annotated; scrollable, read-only |
-| **Legend** | Colour swatches for every label, with the keyboard key shown in brackets. With [layers](#layers), it also names the layer shown and lists only the labels shown. |
+| **Legend** | Colour swatches for every label, with the keyboard key shown in brackets. With [layers](#layers), it also names the layer shown and lists only the labels shown, always-shown labels first. |
 | **Status bar** | Feedback on the last action (selection info, save confirmation, errors) |
 
 ---

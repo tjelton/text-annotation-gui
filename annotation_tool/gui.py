@@ -343,9 +343,14 @@ class AnnotationApp:
             font=('Helvetica', 10, 'bold'), padx=8, pady=5,
         ).pack(side='left')
 
-        for lc in self.config.labels.values():
-            if not self._is_shown(lc.internal):
-                continue
+        shown = [lc for lc in self.config.labels.values()
+                 if self._is_shown(lc.internal)]
+        # Always-shown labels first, so they keep their place when Tab
+        # switches layers and only the layer's labels after them change.
+        # (A stable sort: each part keeps the config's order.)
+        shown.sort(key=lambda lc: lc.group in self.config.layers)
+
+        for lc in shown:
             cell = tk.Frame(legend_frame, bg='#ecf0f1', padx=4, pady=4)
             cell.pack(side='left')
             tk.Label(
