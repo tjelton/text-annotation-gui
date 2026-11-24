@@ -30,6 +30,13 @@ def _annotator_name_error(name: str) -> str:
     return ''
 
 
+def _print_labels(config: Config) -> None:
+    """Print the labels, and the layers if the config has them."""
+    print(f"Labels  : {', '.join(f'[{lc.key}] {lc.name}' for lc in config.labels.values())}")
+    if config.layers:
+        print(f"Layers  : {' / '.join(config.layers)}  (Tab switches between them)")
+
+
 def _readable_files(paths: list) -> list:
     """Return the paths that can be read as UTF-8, warning about the rest."""
     readable = []
@@ -134,6 +141,8 @@ Examples:
     except (ValueError, OSError) as exc:
         print(f"Error reading config: {exc}", file=sys.stderr)
         sys.exit(1)
+    for warning in config.warnings:
+        print(f"Warning: {warning}", file=sys.stderr)
 
     files = get_txt_files(args.folder)
     if not files:
@@ -158,7 +167,7 @@ Examples:
                   file=sys.stderr)
             sys.exit(1)
         print(f"Files   : {len(files)}")
-        print(f"Labels  : {', '.join(f'[{lc.key}] {lc.name}' for lc in config.labels.values())}")
+        _print_labels(config)
         if output_dir:
             print(f"Output  : {output_dir}")
         if args.annotator:
@@ -211,7 +220,7 @@ Examples:
 
         print(f"Mode    : Adjudication")
         print(f"Files   : {len(files)}")
-        print(f"Labels  : {', '.join(f'[{lc.key}] {lc.name}' for lc in config.labels.values())}")
+        _print_labels(config)
         print(f"Annotators: {', '.join(name for name, _ in annotator_data)}")
         if output_dir:
             print(f"Output  : {output_dir}")

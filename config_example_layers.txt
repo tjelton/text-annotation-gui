@@ -1,0 +1,42 @@
+# Annotation configuration — Feedback example with three layers of coding
+#
+# Format:
+#   Label:  <name>  <key>  <colour_or_style>  [group="<group>"]
+#   Layers: <group>  <group>  [...]
+#
+# Three groups of labels:
+#   level        feedback questions (feed up / feed back / feed forward)
+#   dimension    feedback levels (self / task / process / self-regulation)
+#   specificity  specificity of each idea (instance / what / both)
+#
+# The Layers: line names the groups that take turns on screen. Only one of
+# them is shown, and can be edited, at a time; press Tab to switch. Groups
+# that aren't named are always shown.
+#
+# Here the level and specificity groups take turns, and the dimension
+# colours are always shown. Layers are never shown together, so level and
+# specificity can both use text styles; dimension uses colours, so it can
+# sit underneath either of them.
+#
+# Other set-ups for the same labels:
+#   Layers:  level  dimension  specificity    one group at a time
+#   (no Layers: line)                         everything at once, as without
+#                                             layers (level and specificity
+#                                             would then share text styles)
+#
+# Press 'u' to remove the shown layer's labels from the selection.
+# Press ']' for next file, '[' for previous file.
+# Ctrl+S to save, Ctrl+Z to undo, Ctrl+Q to quit.
+
+Label:  F-UP     1   italic     group="level"
+Label:  F-BA     2   bold       group="level"
+Label:  F-FF     3   underline  group="level"
+Label:  SELF     q   #e67e22    group="dimension"
+Label:  TASK     w   #9b59b6    group="dimension"
+Label:  PROC     e   #00ff04    group="dimension"
+Label:  SREG     r   #00f7ff    group="dimension"
+Label:  SP-INST  a   italic     group="specificity"
+Label:  SP-WHAT  s   bold       group="specificity"
+Label:  SP-BOTH  d   underline  group="specificity"
+
+Layers:  level  specificity

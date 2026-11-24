@@ -79,7 +79,7 @@ This opens the annotation window. Select text, press a label key, and your annot
 |---|---|
 | **Header** | Current filename, annotator name, progress counter, navigation and action buttons |
 | **Text area** | The document being annotated; scrollable, read-only |
-| **Legend** | Colour swatches for every label, with the keyboard key shown in brackets |
+| **Legend** | Colour swatches for every label, with the keyboard key shown in brackets. With [layers](#layers), it also names the layer shown and lists only the labels shown. |
 | **Status bar** | Feedback on the last action (selection info, save confirmation, errors) |
 
 ---
@@ -99,7 +99,7 @@ With text selected, press the **single-character key** for the label you want (s
 
 ### 3. Remove annotations
 
-Select the span you want to clear and press **`u`**. This removes every annotation overlapping that selection, regardless of label.
+Select the span you want to clear and press **`u`**. This removes every annotation overlapping that selection, regardless of label. (With [layers](#layers), it removes only the labels of the layer shown.)
 
 ### 4. Undo
 
@@ -126,7 +126,8 @@ Close the window or press **Ctrl+Q** (or **Cmd+Q** on macOS). If there are unsav
 | Key | Action |
 |---|---|
 | *Label key* (e.g. `p`, `o`, `l`) | Apply or toggle that label on the selected text |
-| `u` | Remove **all** annotations overlapping the current selection |
+| `u` | Remove **all** annotations overlapping the current selection (with [layers](#layers): only the shown layer's labels) |
+| `Tab` / `Shift+Tab` | Show the next / previous layer (only when the config has a [`Layers:`](#layers) line) |
 | `]` | Next file (auto-saves first) |
 | `[` | Previous file (auto-saves first) |
 | `Ctrl+S` | Save current file |
@@ -214,6 +215,51 @@ Label:  SREG    r   #00f7ff  group="dimension"
 Label:  F-UP    1   italic
 ```
 
+### Layers
+
+With several groups, showing every label at once can run out of ways to draw them: a span has only one highlight colour, and there are only three text styles. A `Layers:` line lets some groups take turns instead:
+
+```
+Layers:  level  specificity
+```
+
+- The groups named on the line are **layers**. Only one layer is shown at a time. Press **Tab** to show the next one (**Shift+Tab** goes back). The legend names the layer shown, and the layer stays the same when you move between files.
+- Groups that are **not** named, and labels with no group, are **always shown**.
+- Only the labels on screen can be applied. Pressing the key of a hidden layer's label tells you which layer it is in.
+- **`u`** removes only the shown layer's labels from the selection. Always-shown labels stay. To remove one, select exactly its span and press its key again. To change one, press another key from its group.
+- The shown layer's spans always get `[ ]` brackets, whether they use a colour or a text style, so two neighbouring spans with the same label stay distinct.
+- In [adjudication mode](#adjudication-mode), each group is compared on its own.
+- Layers change only what is shown and edited. The annotation files are written exactly the same way.
+
+The same labels can be set up three ways:
+
+| Set-up | Config | What is shown |
+|---|---|---|
+| Everything at once (the default) | no `Layers:` line | every label together |
+| One group at a time | `Layers: level dimension specificity` | one group; Tab switches |
+| Some groups switch, others stay | `Layers: level specificity` | the `dimension` colours always, plus either the `level` or the `specificity` labels |
+
+Layers are never shown together, so they can reuse the same colours or text styles. Each layer is drawn on top of the always-shown labels, though, so give the layers and the always-shown labels different kinds of display. For example, the always-shown group uses colours and the layers use text styles. Two highlight colours on one word turn grey, and two labels with the same text style can't be told apart. The tool prints a warning in the terminal at start-up if a layer and an always-shown label clash in either way.
+
+A ready-to-use example with three layers is provided at `config_example_layers.txt`:
+
+```
+Label:  F-UP     1   italic     group="level"
+Label:  F-BA     2   bold       group="level"
+Label:  F-FF     3   underline  group="level"
+Label:  SELF     q   #e67e22    group="dimension"
+Label:  TASK     w   #9b59b6    group="dimension"
+Label:  PROC     e   #00ff04    group="dimension"
+Label:  SREG     r   #00f7ff    group="dimension"
+Label:  SP-INST  a   italic     group="specificity"
+Label:  SP-WHAT  s   bold       group="specificity"
+Label:  SP-BOTH  d   underline  group="specificity"
+
+Layers:  level  specificity
+```
+
+A group name containing spaces can be quoted, e.g. `Layers: "feedback level" specificity`. A trailing `# comment` is allowed.
+
 ### Rules
 
 - A trailing `# comment` is allowed after the fields; any other extra text (e.g. `group=level` without quotes) is reported as an error.
@@ -221,6 +267,7 @@ Label:  F-UP    1   italic
 - The keys `[`, `]`, and `u` are **reserved** for navigation and cannot be used as label keys.
 - Label names must be unique.
 - At least one label must be defined.
+- A `Layers:` line is optional and may appear only once. It must name at least two groups, each used by at least one label.
 
 A ready-to-use example file is provided at `config_example.txt`.
 
@@ -369,6 +416,8 @@ The tool compares annotations across all annotators for each document:
 - **Disagreements** — any span where annotators differ (different boundaries, different labels, or an annotation present for some annotators but not others) — are highlighted with a **red background**.
 
 The adjudicator uses the same label controls as annotation mode to resolve disagreements: select a span and press a label key to apply the final label. Agreed annotations can also be changed if needed.
+
+**With [layers](#layers), each group is compared on its own.** If every annotator gave a span the same `level` and `dimension` labels but different `specificity` labels, the `level` and `dimension` labels are pre-loaded as agreed and only the specificity disagreement is red. The red highlights and the annotator info overlay cover only the groups on screen, so press **Tab** to see each layer's disagreements. Without a `Layers:` line, a span's whole label set must match, as before.
 
 **Annotators who made no annotations on a document** (no file for it, or an empty one) most likely skipped it by mistake. They are left out of that document's comparison, so their absence doesn't turn everyone else's work red, and a yellow notice above the text names them, e.g. *"Bob made no annotations on this document, so they are left out of the comparison."* If only one annotator remains, their annotations are pre-loaded as agreed.
 

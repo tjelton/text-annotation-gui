@@ -91,6 +91,12 @@ class AnnotationApp:
         # Font size for the text area (adjustable at runtime)
         self.font_size: int = 13
 
+        # The layer (group) shown and edited now; None when the config has
+        # no Layers: line, so every label is shown
+        self._active_layer: Optional[str] = (
+            config.layers[0] if config.layers else None
+        )
+
         # Cache for composite style tags (used when multiple style labels overlap)
         self._combo_tags: dict = {}
         self._combo_ids = itertools.count()   # never reused, so names can't clash
@@ -101,7 +107,8 @@ class AnnotationApp:
         self._annotator_names: List[str] = [
             name for name, _ in self._adjudication_annotators
         ]
-        self._disagreement_positions: set = set()
+        # group → token positions where annotators disagree (see compute_adjudication)
+        self._disagreement_positions: dict = {}
         self._token_annotator_info: dict = {}
         self._viewing_annotator: Optional[str] = None
         self._saved_annotation_set: Optional[AnnotationSet] = None
@@ -241,61 +248,9 @@ class AnnotationApp:
         self.cursor_tags_label.pack(side='right')
 
         # ── Legend panel ──────────────────────────────────────────────
-        legend_frame = tk.Frame(self.root, bg='#ecf0f1', relief='groove', bd=1)
-        legend_frame.pack(fill='x', side='bottom', padx=0, pady=0)
-
-        tk.Label(
-            legend_frame, text='Labels:', bg='#ecf0f1', fg='black',
-            font=('Helvetica', 10, 'bold'), padx=8, pady=5,
-        ).pack(side='left')
-
-        for lc in self.config.labels.values():
-            cell = tk.Frame(legend_frame, bg='#ecf0f1', padx=4, pady=4)
-            cell.pack(side='left')
-            tk.Label(
-                cell, text=f'[{lc.key}]', bg='#ecf0f1',
-                font=('Courier', 10, 'bold'), fg='#2c3e50',
-            ).pack(side='left')
-            if lc.style:
-                swatch_font = tkfont.Font(
-                    family='Helvetica', size=10,
-                    weight='bold' if lc.style == 'bold' else 'normal',
-                    slant='italic' if lc.style == 'italic' else 'roman',
-                    underline=lc.style == 'underline',
-                )
-                tk.Label(
-                    cell,
-                    text=f' {lc.name} ',
-                    bg='#ecf0f1',
-                    fg='#2c3e50',
-                    font=swatch_font,
-                    relief='groove', padx=4, pady=2,
-                ).pack(side='left', padx=(2, 4))
-            else:
-                tk.Label(
-                    cell,
-                    text=f' {lc.name} ',
-                    bg=lc.colour,
-                    fg='black',
-                    font=('Helvetica', 10, 'bold'),
-                    relief='flat', padx=4, pady=2,
-                ).pack(side='left', padx=(2, 4))
-
-        # Multi-label indicator in legend
-        cell = tk.Frame(legend_frame, bg='#ecf0f1', padx=4, pady=4)
-        cell.pack(side='left')
-        tk.Label(
-            cell, text='[overlap]', bg='#ecf0f1',
-            font=('Courier', 10), fg='#7f8c8d',
-        ).pack(side='left')
-        tk.Label(
-            cell,
-            text=' multi-coloured ',
-            bg=self.MULTI_LABEL_COLOUR,
-            fg='white',
-            font=('Helvetica', 10),
-            relief='flat', padx=4, pady=2,
-        ).pack(side='left', padx=(2, 4))
+        self._legend_frame = tk.Frame(self.root, bg='#ecf0f1', relief='groove', bd=1)
+        self._legend_frame.pack(fill='x', side='bottom', padx=0, pady=0)
+        self._build_legend()
 
         # ── View banner (adjudication mode — shown when viewing an annotator) ──
         if self._adjudication_mode:
@@ -361,6 +316,122 @@ class AnnotationApp:
             # Hidden by default; placed when there is info to show
             self._ann_info_visible = False
             self._text_outer.bind('<Configure>', self._reposition_ann_info)
+
+    def _build_legend(self) -> None:
+        """Fill the legend with the active layer (if any) and the labels shown."""
+        legend_frame = self._legend_frame
+        for child in legend_frame.winfo_children():
+            child.destroy()
+
+        if self._active_layer is not None:
+            tk.Label(
+                legend_frame, text='Layer:', bg='#ecf0f1', fg='black',
+                font=('Helvetica', 10, 'bold'), padx=8, pady=5,
+            ).pack(side='left')
+            tk.Label(
+                legend_frame, text=f' {self._active_layer} ',
+                bg='#2c3e50', fg='white', font=('Helvetica', 10, 'bold'),
+                relief='flat', padx=4, pady=2,
+            ).pack(side='left')
+            tk.Label(
+                legend_frame, text='(Tab to switch)', bg='#ecf0f1', fg='#7f8c8d',
+                font=('Helvetica', 10), padx=4, pady=5,
+            ).pack(side='left', padx=(0, 8))
+
+        tk.Label(
+            legend_frame, text='Labels:', bg='#ecf0f1', fg='black',
+            font=('Helvetica', 10, 'bold'), padx=8, pady=5,
+        ).pack(side='left')
+
+        for lc in self.config.labels.values():
+            if not self._is_shown(lc.internal):
+                continue
+            cell = tk.Frame(legend_frame, bg='#ecf0f1', padx=4, pady=4)
+            cell.pack(side='left')
+            tk.Label(
+                cell, text=f'[{lc.key}]', bg='#ecf0f1',
+                font=('Courier', 10, 'bold'), fg='#2c3e50',
+            ).pack(side='left')
+            if lc.style:
+                swatch_font = tkfont.Font(
+                    family='Helvetica', size=10,
+                    weight='bold' if lc.style == 'bold' else 'normal',
+                    slant='italic' if lc.style == 'italic' else 'roman',
+                    underline=lc.style == 'underline',
+                )
+                tk.Label(
+                    cell,
+                    text=f' {lc.name} ',
+                    bg='#ecf0f1',
+                    fg='#2c3e50',
+                    font=swatch_font,
+                    relief='groove', padx=4, pady=2,
+                ).pack(side='left', padx=(2, 4))
+            else:
+                tk.Label(
+                    cell,
+                    text=f' {lc.name} ',
+                    bg=lc.colour,
+                    fg='black',
+                    font=('Helvetica', 10, 'bold'),
+                    relief='flat', padx=4, pady=2,
+                ).pack(side='left', padx=(2, 4))
+
+        # Multi-label indicator in legend
+        cell = tk.Frame(legend_frame, bg='#ecf0f1', padx=4, pady=4)
+        cell.pack(side='left')
+        tk.Label(
+            cell, text='[overlap]', bg='#ecf0f1',
+            font=('Courier', 10), fg='#7f8c8d',
+        ).pack(side='left')
+        tk.Label(
+            cell,
+            text=' multi-coloured ',
+            bg=self.MULTI_LABEL_COLOUR,
+            fg='white',
+            font=('Helvetica', 10),
+            relief='flat', padx=4, pady=2,
+        ).pack(side='left', padx=(2, 4))
+
+    # ------------------------------------------------------------------
+    # Layers
+    # ------------------------------------------------------------------
+
+    def _label_group(self, internal: str) -> Optional[str]:
+        """The group of *internal* (None if it has none or isn't in the config)."""
+        lc = self.config.internal_to_config.get(internal)
+        return lc.group if lc else None
+
+    def _group_shown(self, group: Optional[str]) -> bool:
+        """Whether labels in *group* are drawn and editable right now.
+
+        Without layers everything is.  With layers, a layer's labels are
+        shown only while it is active; every other group (and None, for
+        labels with no group or unknown to the config) is always shown.
+        """
+        return (self._active_layer is None
+                or group not in self.config.layers
+                or group == self._active_layer)
+
+    def _is_shown(self, internal: str) -> bool:
+        return self._group_shown(self._label_group(internal))
+
+    def _shown(self, labels: set) -> set:
+        """The labels in *labels* that are shown right now."""
+        return {internal for internal in labels if self._is_shown(internal)}
+
+    def _switch_layer(self, step: int) -> None:
+        """Show the layer *step* places after the active one (wrapping round)."""
+        layers = self.config.layers
+        idx = layers.index(self._active_layer)
+        self._active_layer = layers[(idx + step) % len(layers)]
+        self._build_legend()
+        if self.token_map is not None:
+            self._redraw_annotations()
+            self._restore_selection()
+        self.status_var.set(
+            f"Showing the {self._active_layer} layer (Tab to switch)"
+        )
 
     def _reposition_ann_info(self, _event=None) -> None:
         """Keep the annotator info overlay anchored to the bottom-right."""
@@ -518,6 +589,15 @@ class AnnotationApp:
         # the insert cursor and clear the visible selection, which would leave
         # a label key to act on a span the user can no longer see.
         if self._scroll_for_key(keysym):
+            return 'break'
+
+        # --- Switch layer (Tab / Shift+Tab) ----------------------------------
+        # Allowed when viewing an annotator: it changes the view, not the data.
+        # X11 reports Shift+Tab as ISO_Left_Tab; macOS and Windows as Tab+Shift.
+        if keysym in ('Tab', 'ISO_Left_Tab'):
+            if self._active_layer is not None:
+                back = keysym == 'ISO_Left_Tab' or bool(event.state & 0x1)
+                self._switch_layer(-1 if back else 1)
             return 'break'
 
         # --- Read-only when viewing an annotator ----------------------------
@@ -696,8 +776,11 @@ class AnnotationApp:
 
             self._annotator_sets_cache = dict(annotator_sets)
 
+            # With layers, each group is compared on its own, so disagreeing
+            # on one layer of a span doesn't hide agreement on the others.
             agreed, disagreements, details, empty = compute_adjudication(
                 annotator_sets, self.token_map,
+                partition_of=self._label_group if self.config.layers else None,
             )
             self._disagreement_positions = disagreements
             self._token_annotator_info = details
@@ -859,7 +942,8 @@ class AnnotationApp:
         pos_labels: dict = {}
         pos_ann_ids: dict = {}
         for ann in self.annotation_set.annotations:
-            if not ann.labels:
+            labels = self._shown(ann.labels)   # hidden layers aren't drawn
+            if not labels:
                 continue
             ann_id = id(ann)
             for sl in range(ann.line, ann.end_line + 1):
@@ -879,7 +963,7 @@ class AnnotationApp:
                     if key not in pos_labels:
                         pos_labels[key] = set()
                         pos_ann_ids[key] = set()
-                    pos_labels[key].update(ann.labels)
+                    pos_labels[key].update(labels)
                     pos_ann_ids[key].add(ann_id)
 
         # Resolve each token position to a tag name
@@ -1048,14 +1132,20 @@ class AnnotationApp:
     # ------------------------------------------------------------------
 
     def _insert_style_pipes(self) -> None:
-        """Insert [ ] at the boundaries of styled (bold/italic/underline) spans."""
+        """Insert [ ] at the boundaries of styled (bold/italic/underline) spans.
+
+        With layers, every span of the active layer gets them too, whatever
+        its display, so neighbouring spans with the same label stay distinct.
+        """
         if self.token_map is None:
             return
 
-        styled_internals = {
-            lc.internal for lc in self.config.labels.values() if lc.style
+        bracketed = {
+            lc.internal for lc in self.config.labels.values()
+            if lc.style or (self._active_layer is not None
+                            and lc.group == self._active_layer)
         }
-        if not styled_internals:
+        if not bracketed:
             return
 
         # Collect open ([) and close (]) positions separately.
@@ -1063,7 +1153,7 @@ class AnnotationApp:
         open_positions: set = set()
         close_positions: set = set()
         for ann in self.annotation_set.annotations:
-            if not ann.labels or not (ann.labels & styled_internals):
+            if not (self._shown(ann.labels) & bracketed):
                 continue
             start_cr = self.token_map.token_char_range(ann.line, ann.start_token)
             end_cr = self.token_map.token_char_range(ann.end_line, ann.end_token)
@@ -1138,14 +1228,19 @@ class AnnotationApp:
     # ------------------------------------------------------------------
 
     def _apply_disagreement_highlights(self) -> None:
-        """Apply red background to all disagreement token positions."""
+        """Apply red background to the disagreements in the groups shown."""
         if not self._disagreement_positions or self.token_map is None:
             return
         self.text_widget.tag_remove(self.DISAGREEMENT_TAG, '1.0', 'end')
 
+        positions: set = set()
+        for group, group_positions in self._disagreement_positions.items():
+            if self._group_shown(group):
+                positions |= group_positions
+
         # Group by line and merge consecutive tokens into runs
         by_line: dict = {}
-        for (sl, tok) in self._disagreement_positions:
+        for (sl, tok) in positions:
             by_line.setdefault(sl, []).append(tok)
 
         for sl, toks in by_line.items():
@@ -1251,8 +1346,11 @@ class AnnotationApp:
             self._ann_info_frame.place_forget()
             self._ann_info_visible = False
             return
-        info = self._token_annotator_info.get((slate_line, token), {})
-        if not info:
+        info = {
+            name: self._shown(labels)   # only the groups on screen
+            for name, labels in self._token_annotator_info.get((slate_line, token), {}).items()
+        }
+        if not any(info.values()):
             self._ann_info_frame.place_forget()
             self._ann_info_visible = False
             return
@@ -1390,6 +1488,12 @@ class AnnotationApp:
 
     def _apply_label(self, lc: LabelConfig) -> None:
         """Apply (or toggle) *lc* on the current snapped selection."""
+        if not self._is_shown(lc.internal):
+            self.status_var.set(
+                f"'{lc.name}' is in the {lc.group} layer, which is hidden. "
+                f"Press Tab to switch to it."
+            )
+            return
         if self.current_span is None:
             self.status_var.set(
                 f"Select some text first, then press [{lc.key}] to apply '{lc.name}'"
@@ -1428,21 +1532,41 @@ class AnnotationApp:
     # ------------------------------------------------------------------
 
     def _remove_selected_annotations(self) -> None:
-        """Remove every annotation that overlaps the current selection."""
+        """Remove every annotation that overlaps the current selection.
+
+        With layers, only the active layer's labels are removed: the other
+        layers aren't on screen, and always-shown labels usually run across
+        the active layer's spans.
+        """
         if self.current_span is None:
             self.status_var.set("Select text first, then press 'u' to remove annotations")
             return
 
         start_sl, start_tok, end_sl, end_tok = self.current_span
-        self.undo_stack.append(self.annotation_set.copy())
-        self.annotation_set.remove_overlapping_range(
-            start_sl, start_tok, end_sl, end_tok
-        )
+        if self._active_layer is not None:
+            layer_labels = self.config.groups[self._active_layer]
+            snapshot = self.annotation_set.copy()
+            removed = self.annotation_set.remove_labels_overlapping_range(
+                layer_labels, start_sl, start_tok, end_sl, end_tok,
+            )
+            if not removed:
+                self.status_var.set(
+                    f"No {self._active_layer} labels on the selection to remove"
+                )
+                return
+            self.undo_stack.append(snapshot)
+            message = f"Removed {self._active_layer} labels on selected span"
+        else:
+            self.undo_stack.append(self.annotation_set.copy())
+            self.annotation_set.remove_overlapping_range(
+                start_sl, start_tok, end_sl, end_tok
+            )
+            message = "Removed all annotations on selected span"
 
         self._redraw_annotations()
         self.has_unsaved = True
         self._clear_selection()
-        self.status_var.set("Removed all annotations on selected span")
+        self.status_var.set(message)
 
     # ------------------------------------------------------------------
     # Undo
@@ -1558,14 +1682,25 @@ class AnnotationApp:
         """Open a modal help window with keyboard shortcut reference."""
         win = tk.Toplevel(self.root)
         win.title("Help — Keyboard Shortcuts")
-        win.geometry("520x420")
-        win.resizable(False, False)
         win.configure(bg='#2c3e50')
 
         label_lines = '\n'.join(
             f"  [{lc.key}]            Apply / toggle label '{lc.name}'"
+            + (f" ({lc.group} layer)" if lc.group in self.config.layers else '')
             for lc in self.config.labels.values()
         )
+        if self._active_layer is not None:
+            remove_line = "  u                    Remove the current layer's labels on selection\n"
+            layer_section = (
+                "Layers\n"
+                "  Tab                  Show the next layer\n"
+                "  Shift+Tab            Show the previous layer\n"
+                f"  ({' / '.join(self.config.layers)}; only the layer shown\n"
+                "  can be edited, other groups are always shown)\n\n"
+            )
+        else:
+            remove_line = "  u                    Remove all annotations on selection\n"
+            layer_section = ''
 
         help_text = (
             "Annotation Tool — Keyboard Shortcuts\n"
@@ -1578,9 +1713,10 @@ class AnnotationApp:
             "  Ctrl+Q               Quit\n\n"
             "Annotation\n"
             f"{label_lines}\n"
-            "  u                    Remove all annotations on selection\n"
+            f"{remove_line}"
             "  Ctrl+Z               Undo last action\n"
             "  Escape               Clear current selection\n\n"
+            f"{layer_section}"
             "Usage\n"
             "  1. Click and drag to select text.\n"
             "  2. Press a label key to annotate the selection.\n"
@@ -1590,9 +1726,17 @@ class AnnotationApp:
             "     navigating between files.\n"
         )
 
+        # Tall enough for the whole text (it grows with the number of
+        # labels), but no taller than the screen
+        help_font = tkfont.Font(family='Courier', size=11)
+        height = help_text.count('\n') * help_font.metrics('linespace') + 110
+        height = min(height, win.winfo_screenheight() - 120)
+        win.geometry(f"600x{max(height, 420)}")
+        win.resizable(False, True)
+
         txt = tk.Text(
             win, wrap='word', bg='#2c3e50', fg='white',
-            font=('Courier', 11), padx=16, pady=12,
+            font=help_font, padx=16, pady=12,
             relief='flat', state='normal', cursor='arrow',
         )
         txt.insert('1.0', help_text)

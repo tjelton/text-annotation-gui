@@ -13,7 +13,7 @@ Annotation file format (slate-compatible):
 
 import os
 import re
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Callable, Dict, List, Optional, Set, Tuple
 
 
 # ---------------------------------------------------------------------------
@@ -430,6 +430,29 @@ class AnnotationSet:
                 self.add_label(l1, t1, t2, label,
                                end_line=l2 if l2 != l1 else None)
 
+    def remove_labels_overlapping_range(
+        self, labels: Set[str],
+        start_line: int, start_tok: int, end_line: int, end_tok: int,
+    ) -> int:
+        """Remove *labels* from every annotation that overlaps the span.
+
+        Like ``remove_overlapping_range`` but limited to *labels*: the
+        annotations' other labels are kept.  Returns how many labels were
+        removed.
+        """
+        removed = 0
+        for ann in list(self.annotations):
+            if not ann.overlaps_span_range(start_line, start_tok, end_line, end_tok):
+                continue
+            hit = ann.labels & labels
+            if not hit:
+                continue
+            removed += len(hit)
+            ann.labels -= hit
+            if not ann.labels:
+                self.annotations.remove(ann)
+        return removed
+
     def remove_overlapping(self, line: int, start: int, end: int) -> None:
         """Remove every annotation that overlaps (line, start–end)."""
         s, e = min(start, end), max(start, end)
@@ -582,7 +605,8 @@ def find_annotators(
 def compute_adjudication(
     annotator_sets: List[Tuple[str, 'AnnotationSet']],
     token_map: 'TokenMap',
-) -> Tuple['AnnotationSet', set, dict, List[str]]:
+    partition_of: Optional[Callable[[str], Optional[str]]] = None,
+) -> Tuple['AnnotationSet', Dict[Optional[str], set], dict, List[str]]:
     """Compare annotations from multiple annotators for a single document.
 
     An annotator with no annotations on the document (no file, or an empty
@@ -594,12 +618,19 @@ def compute_adjudication(
     identical span (same line, start_token, end_line, end_token) with an
     identical label set.  Everything else is a disagreement.
 
+    *partition_of*, if given, maps each label to the part of the scheme it
+    belongs to (e.g. its group).  Each part of a span is then compared on
+    its own, so annotators who agree on one part of a span still agree
+    there when they differ on another.  Without it the whole label set is
+    compared, as one part keyed None.
+
     Returns
     -------
     agreed_set : AnnotationSet
         Annotations identical across all compared annotators.
-    disagreement_positions : set of (slate_line, token)
-        Token positions covered by at least one non-agreed annotation.
+    disagreement_positions : dict
+        ``{part: set of (slate_line, token)}``: token positions covered by
+        at least one non-agreed annotation, for each part.
     token_annotator_info : dict
         ``{(line, token): {annotator_name: set_of_internal_labels}}``
     empty_annotators : list of str
@@ -614,26 +645,35 @@ def compute_adjudication(
         if name not in empty_annotators
     ]
     if not annotator_sets:
-        return AnnotationSet(), set(), {}, empty_annotators
+        return AnnotationSet(), {}, {}, empty_annotators
 
-    def _ann_key(ann: Annotation) -> tuple:
-        return (ann.line, ann.start_token, ann.end_line, ann.end_token,
-                frozenset(ann.labels))
+    def _part_keys(ann: Annotation) -> List[tuple]:
+        """One comparison key per part of the scheme the labels fall in."""
+        by_part: Dict[Optional[str], Set[str]] = {}
+        for label in ann.labels:
+            part = partition_of(label) if partition_of else None
+            by_part.setdefault(part, set()).add(label)
+        return [(part, ann.line, ann.start_token, ann.end_line, ann.end_token,
+                 frozenset(labels)) for part, labels in by_part.items()]
 
     per_annotator_keys: List[set] = []
     for _name, ann_set in annotator_sets:
-        keys = {_ann_key(a) for a in ann_set.annotations if a.labels}
+        keys = {k for a in ann_set.annotations for k in _part_keys(a)}
         per_annotator_keys.append(keys)
 
     agreed_keys = per_annotator_keys[0]
     for keys in per_annotator_keys[1:]:
         agreed_keys = agreed_keys & keys
 
+    # Agreed parts of the same span go back into one annotation, as the
+    # tool keeps all of a span's labels together.
+    agreed_spans: Dict[tuple, Set[str]] = {}
+    for _part, line, start_tok, end_line, end_tok, labels in agreed_keys:
+        agreed_spans.setdefault((line, start_tok, end_line, end_tok), set()).update(labels)
     agreed_set = AnnotationSet()
-    for key in agreed_keys:
-        line, start_tok, end_line, end_tok, labels = key
+    for (line, start_tok, end_line, end_tok), labels in agreed_spans.items():
         agreed_set.annotations.append(
-            Annotation(line, start_tok, end_tok, set(labels), end_line=end_line)
+            Annotation(line, start_tok, end_tok, labels, end_line=end_line)
         )
 
     def _covered_tokens(ann: Annotation) -> List[Tuple[int, int]]:
@@ -654,17 +694,17 @@ def compute_adjudication(
                 positions.append((sl, tok))
         return positions
 
-    disagreement_positions: set = set()
+    disagreement_positions: Dict[Optional[str], set] = {}
     token_annotator_info: dict = {}
 
     for ann_name, ann_set in annotator_sets:
         for ann in ann_set.annotations:
             if not ann.labels:
                 continue
-            is_agreed = _ann_key(ann) in agreed_keys
+            disputed = [k[0] for k in _part_keys(ann) if k not in agreed_keys]
             for pos in _covered_tokens(ann):
-                if not is_agreed:
-                    disagreement_positions.add(pos)
+                for part in disputed:
+                    disagreement_positions.setdefault(part, set()).add(pos)
                 if pos not in token_annotator_info:
                     token_annotator_info[pos] = {}
                 if ann_name not in token_annotator_info[pos]:
